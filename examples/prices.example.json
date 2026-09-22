@@ -1,0 +1,10 @@
+{
+  "replace-with-your-openai-model": {
+    "input_per_million": 0,
+    "output_per_million": 0
+  },
+  "replace-with-your-jev-model": {
+    "input_per_million": 0,
+    "output_per_million": 0
+  }
+}

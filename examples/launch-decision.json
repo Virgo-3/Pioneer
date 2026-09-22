@@ -1,0 +1,38 @@
+{
+  "title": "Launch now, pilot, or hold",
+  "units": "utility points",
+  "states": {
+    "demand_high": 0.4,
+    "demand_low": 0.6
+  },
+  "actions": {
+    "launch": {
+      "cost": 2,
+      "outcomes": {
+        "demand_high": {"payoff": 18},
+        "demand_low": {"payoff": -12, "undo": -5, "undo_cost": 2}
+      }
+    },
+    "pilot": {
+      "cost": 1,
+      "outcomes": {
+        "demand_high": {"payoff": 8},
+        "demand_low": {"payoff": -2, "undo": 0, "undo_cost": 0.5}
+      }
+    },
+    "hold": {
+      "outcomes": {
+        "demand_high": {"payoff": 0},
+        "demand_low": {"payoff": 0}
+      }
+    }
+  },
+  "wait": {
+    "delay_cost": 1,
+    "information_cost": 0.5,
+    "signals": {
+      "positive": {"demand_high": 0.85, "demand_low": 0.2},
+      "negative": {"demand_high": 0.15, "demand_low": 0.8}
+    }
+  }
+}
