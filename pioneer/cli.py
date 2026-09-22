@@ -104,7 +104,9 @@ def main(argv: list[str] | None = None) -> int:
 
 def _ask(store: Store, text: str, model: str | None = None) -> None:
     outcome = run_turn(store, text, model=model)
-    print(f"\nPioneer | {outcome.model} | {outcome.commit[:12]}\n{outcome.text}\n")
+    if outcome.branched_from:
+        print(f"Exploring on {outcome.branch} (from {outcome.branched_from}).")
+    print(f"\nPioneer | {outcome.branch} | {outcome.model} | {outcome.commit[:12]}\n{outcome.text}\n")
     for record in outcome.usage:
         print(f"{record['provider']}: {record['input_tokens']} input / {record['output_tokens']} output tokens")
 
@@ -196,7 +198,7 @@ def _chat(store: Store, model: str | None) -> None:
             if line in {"/exit", "/quit"}:
                 return
             if line == "/help":
-                print("/branch NAME  /branches  /switch NAME  /log  /status  /usage")
+                print("/branch NAME  /branches  /switch NAME  /log  /status  /usage  /analysis")
                 print("/decide FILE  /triage ACTION  /model MODEL  /exit")
                 continue
             if line.startswith("/model "):
@@ -218,6 +220,14 @@ def _chat(store: Store, model: str | None) -> None:
                 print(f"{store.current_branch()} @ {store.resolve()[:12]}")
             elif line == "/usage":
                 _usage(store, None)
+            elif line == "/analysis":
+                for _, obj in store.log():
+                    decision = obj["payload"].get("decision")
+                    if decision:
+                        print(json.dumps(decision, indent=2, ensure_ascii=False))
+                        break
+                else:
+                    print("No calculated decision on this branch yet.")
             elif line.startswith("/decide "):
                 _decide(store, shlex.split(line[8:])[0])
             elif line.startswith("/triage "):

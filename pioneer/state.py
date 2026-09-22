@@ -153,6 +153,20 @@ class Store:
             _atomic_write(self.data / "HEAD", (name + "\n").encode("ascii"))
         return object_id
 
+    def fork_and_switch(self, name: str, expected_head: str) -> str:
+        """Create and enter an exploration branch without losing the source branch."""
+        if not BRANCH_NAME.fullmatch(name):
+            raise StoreError("Invalid branch name")
+        with self._locked():
+            source = self.current_branch()
+            if self._read_ref(source) != expected_head:
+                raise StoreError("Branch changed while planning this turn. Please retry.")
+            if (self.data / "refs" / name).exists():
+                raise StoreError(f"Branch already exists: {name}")
+            _atomic_write(self.data / "refs" / name, (expected_head + "\n").encode("ascii"))
+            _atomic_write(self.data / "HEAD", (name + "\n").encode("ascii"))
+        return source
+
     def rewind(self, ref: str) -> str:
         """Move the current branch pointer; old objects and ledger entries stay intact."""
         with self._locked():

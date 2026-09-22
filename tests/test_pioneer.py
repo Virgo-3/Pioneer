@@ -118,11 +118,16 @@ class ProviderTests(unittest.TestCase):
         post.return_value = {"id": "resp_2", "model": "test-model", "output": [
             {"content": [{"type": "output_text", "text": json.dumps({
                 "reply": "Tell me the states.", "decision_requested": True,
-                "case_json": None, "missing": ["state probabilities"]})}]}],
+                "case_json": None, "missing": ["state probabilities"],
+                "context": {"status": "active", "goal": "Decide whether to launch", "options": ["launch"],
+                            "known": [], "uncertain": ["demand"], "provisional_view": "Try a pilot",
+                            "next_questions": ["What would a pilot cost?"]},
+                "explore_alternative": False})}]}],
             "usage": {"input_tokens": 20, "output_tokens": 5}}
         plan = compose_turn([{"role": "user", "content": "Should I launch?"}], model="test-model")
         self.assertTrue(plan.decision_requested)
         self.assertEqual(plan.missing, ["state probabilities"])
+        self.assertEqual(plan.context["provisional_view"], "Try a pilot")
         self.assertEqual(post.call_args.args[2]["text"]["format"]["type"], "json_schema")
 
 
@@ -153,7 +158,7 @@ class PipelineTests(unittest.TestCase):
                                        "openai-test", 50, 20, "resp_3")
         outcome = run_turn(self.store, text)
         self.assertEqual(outcome.decision["recommendation"]["kind"], "wait")
-        self.assertIn("Recommendation: wait", outcome.text)
+        self.assertIn("I would wait", outcome.text)
         self.assertEqual(len(self.store.log()), 2)
         self.assertEqual(len(self.store.usage()), 2)
         self.assertEqual({record["commit"] for record in self.store.usage()}, {outcome.commit})
@@ -169,7 +174,7 @@ class PipelineTests(unittest.TestCase):
                                        "openai-test", 10, 5, "resp_4")
         outcome = run_turn(self.store, "Act pays 10 if good and -10 if bad. What should I do?")
         self.assertIsNone(outcome.decision)
-        self.assertIn("numbers you did not provide", outcome.text)
+        self.assertIn("can't trace every number", outcome.text)
         self.assertNotIn("decision", self.store.read_object(outcome.commit)["payload"])
         self.assertEqual(len(self.store.usage()), 1)
 
@@ -183,7 +188,48 @@ class PipelineTests(unittest.TestCase):
                                        "openai-test", 10, 5, "resp_5")
         outcome = run_turn(self.store, "Good 50%, bad 50%. Invest pays 10 or -10; hold pays 0. Should I wait?")
         self.assertIsNone(outcome.decision)
-        self.assertIn("To compare waiting", outcome.text)
+        self.assertIn("Waiting could change the choice", outcome.text)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_provisional_reply_is_preserved_and_context_carried_forward(self, compose):
+        context = {"status": "active", "goal": "Launch timing", "options": ["launch", "pilot"],
+                   "known": ["Launch is hard to undo"], "uncertain": ["Pilot duration"],
+                   "provisional_view": "Pilot first", "next_questions": ["How long would a pilot take?"]}
+        compose.side_effect = [
+            TurnPlan("A pilot seems safer because you can change course. How long would it take?",
+                     True, None, ["Pilot duration"], "openai-test", 10, 5, "resp_6", context),
+            TurnPlan("A week sounds short enough to learn before launch.", True, None, [],
+                     "openai-test", 14, 6, "resp_7", {**context, "known": context["known"] + ["Pilot takes a week"],
+                                                     "next_questions": []}),
+        ]
+        first = run_turn(self.store, "Should we launch now or pilot?")
+        self.assertIn("pilot seems safer", first.text)
+        self.assertNotIn("possible states and their probabilities", first.text)
+        second = run_turn(self.store, "A pilot would take a week.")
+        self.assertEqual(second.text, "A week sounds short enough to learn before launch.")
+        self.assertEqual(compose.call_args.kwargs["context"], context)
+        self.assertEqual(self.store.read_object(second.commit)["payload"]["context"]["known"][-1],
+                         "Pilot takes a week")
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_counterfactual_creates_branch_and_keeps_original(self, compose):
+        context = {"status": "active", "goal": "Launch timing", "options": ["launch", "pilot"],
+                   "known": [], "uncertain": [], "provisional_view": "Pilot", "next_questions": []}
+        compose.side_effect = [
+            TurnPlan("A pilot seems reversible.", True, None, [], "openai-test", 10, 5, "resp_8", context),
+            TurnPlan("If we launch anyway, we gain speed but accept more downside.", True, None, [],
+                     "openai-test", 12, 5, "resp_9", context, True),
+        ]
+        first = run_turn(self.store, "Should we pilot?")
+        second = run_turn(self.store, "What if we launch anyway?")
+        self.assertEqual(second.branched_from, "main")
+        self.assertTrue(second.branch.startswith("explore-"))
+        self.assertEqual(self.store.resolve("main"), first.commit)
+        self.assertEqual(self.store.resolve(), second.commit)
+        self.assertEqual(len(self.store.messages("main")), 2)
+        self.assertEqual(len(self.store.messages(second.branch)), 4)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     def test_direct_case_is_analyzed_and_saved_without_api_keys(self):
