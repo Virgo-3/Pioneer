@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .decision import DecisionError, analyze
-from .providers import ProviderError, ask_openai, triage_jev
+from .pipeline import run_turn
+from .providers import ProviderError, triage_jev
 from .state import Store, StoreError
 
 
@@ -23,7 +24,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="Initialize a Pioneer workspace")
     chat = sub.add_parser("chat", help="Open the interactive terminal")
     chat.add_argument("--model", help="OpenAI model for this session")
-    ask = sub.add_parser("ask", help="Send one message to OpenAI")
+    ask = sub.add_parser("ask", help="Run one cohesive conversation turn")
     ask.add_argument("text", nargs="+", help="Message text")
     ask.add_argument("--model", help="OpenAI model")
     branch = sub.add_parser("branch", help="Create or list branches")
@@ -102,19 +103,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _ask(store: Store, text: str, model: str | None = None) -> None:
-    store.require()
-    if not text.strip():
-        raise StoreError("Message cannot be empty")
-    head = store.resolve()
-    messages = store.messages() + [{"role": "user", "content": text}]
-    response = ask_openai(messages, model=model)
-    object_id = store.commit("turn", {"user": text, "assistant": response.text, "provider": "openai", "model": response.model},
-                             expected_head=head,
-                             usage={"provider": "openai", "model": response.model,
-                                    "input_tokens": response.input_tokens, "output_tokens": response.output_tokens,
-                                    "response_id": response.response_id})
-    print(f"\nPioneer · {response.model} · {object_id[:12]}\n{response.text}\n")
-    print(f"{response.input_tokens} input / {response.output_tokens} output tokens")
+    outcome = run_turn(store, text, model=model)
+    print(f"\nPioneer | {outcome.model} | {outcome.commit[:12]}\n{outcome.text}\n")
+    for record in outcome.usage:
+        print(f"{record['provider']}: {record['input_tokens']} input / {record['output_tokens']} output tokens")
 
 
 def _triage(store: Store, text: str) -> None:
@@ -127,7 +119,7 @@ def _triage(store: Store, text: str) -> None:
                              expected_head=head,
                              usage={"provider": "jev", "model": result["model"],
                                     "input_tokens": result["input_tokens"], "output_tokens": result["output_tokens"]})
-    print(f"Jev triage · {object_id[:12]}")
+    print(f"Jev triage | {object_id[:12]}")
     for label, probability in result["scores"].items():
         print(f"  {label.replace('_', ' '):<22} {probability:.1%}")
     print("These are judgments about the description, not measured outcome probabilities. Use 'decide' for an explicit decision case.")
@@ -172,7 +164,7 @@ def _usage(store: Store, prices_file: str | None) -> None:
         print("No API usage recorded.")
         return
     for (provider, model), (input_tokens, output_tokens, calls) in sorted(totals.items()):
-        line = f"{provider}/{model}: {int(calls)} calls · {int(input_tokens)} input · {int(output_tokens)} output tokens"
+        line = f"{provider}/{model}: {int(calls)} calls | {int(input_tokens)} input | {int(output_tokens)} output tokens"
         rate = prices.get(model)
         if rate is not None:
             if not isinstance(rate, dict):
@@ -182,7 +174,7 @@ def _usage(store: Store, prices_file: str | None) -> None:
             if any(not (0 <= value < float("inf")) for value in (input_rate, output_rate)):
                 raise StoreError("Price rates must be finite nonnegative numbers")
             estimate = (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
-            line += f" · estimated ${estimate:.6f}"
+            line += f" | estimated ${estimate:.6f}"
         print(line)
     if not prices_file:
         print("Cost estimate unavailable. Pass --prices FILE with rates per million tokens.")
@@ -190,11 +182,11 @@ def _usage(store: Store, prices_file: str | None) -> None:
 
 def _chat(store: Store, model: str | None) -> None:
     store.require()
-    print("PIONEER  ·  conversational terminal")
-    print(f"Branch {store.current_branch()} @ {store.resolve()[:12]} · /help for commands · /exit to leave")
+    print("PIONEER | conversational terminal")
+    print(f"Branch {store.current_branch()} @ {store.resolve()[:12]} | /help for commands | /exit to leave")
     while True:
         try:
-            line = input(f"\n{store.current_branch()} › ").strip()
+            line = input(f"\n{store.current_branch()} > ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return

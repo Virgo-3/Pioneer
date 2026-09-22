@@ -161,19 +161,20 @@ class Store:
         return target
 
     def commit(self, kind: str, payload: dict[str, Any], *, expected_head: str | None = None,
-               usage: dict[str, Any] | None = None) -> str:
+               usage: dict[str, Any] | list[dict[str, Any]] | None = None) -> str:
         if kind not in {"turn", "decision", "note"}:
             raise StoreError("Unsupported commit kind")
         with self._locked():
             branch = self.current_branch()
             parent = self._read_ref(branch)
+            usage_records = [] if usage is None else usage if isinstance(usage, list) else [usage]
             if expected_head is not None and parent != expected_head:
-                if usage is not None:
-                    self._append_usage({**usage, "orphaned": True})
+                for record in usage_records:
+                    self._append_usage({**record, "orphaned": True})
                 raise StoreError("Branch changed during the API call. Usage was recorded; retry on the current branch.")
             object_id = self._write_object({"schema": 1, "parent": parent, "kind": kind, "timestamp": _now(), "payload": payload})
-            if usage is not None:
-                self._append_usage({**usage, "commit": object_id, "branch": branch})
+            for record in usage_records:
+                self._append_usage({**record, "commit": object_id, "branch": branch})
             _atomic_write(self.data / "refs" / branch, (object_id + "\n").encode("ascii"))
         return object_id
 
