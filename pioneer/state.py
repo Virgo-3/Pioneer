@@ -153,12 +153,14 @@ class Store:
             _atomic_write(self.data / "HEAD", (name + "\n").encode("ascii"))
         return object_id
 
-    def fork_and_switch(self, name: str, expected_head: str) -> str:
+    def fork_and_switch(self, name: str, expected_head: str, *, expected_branch: str | None = None) -> str:
         """Create and enter an exploration branch without losing the source branch."""
         if not BRANCH_NAME.fullmatch(name):
             raise StoreError("Invalid branch name")
         with self._locked():
             source = self.current_branch()
+            if expected_branch is not None and source != expected_branch:
+                raise StoreError("Branch changed while planning this turn. Please retry.")
             if self._read_ref(source) != expected_head:
                 raise StoreError("Branch changed while planning this turn. Please retry.")
             if (self.data / "refs" / name).exists():
@@ -166,6 +168,34 @@ class Store:
             _atomic_write(self.data / "refs" / name, (expected_head + "\n").encode("ascii"))
             _atomic_write(self.data / "HEAD", (name + "\n").encode("ascii"))
         return source
+
+    def fork_and_commit(self, name: str, kind: str, payload: dict[str, Any], *,
+                        expected_head: str, expected_branch: str,
+                        usage: dict[str, Any] | list[dict[str, Any]] | None = None) -> str:
+        """Save a turn as the first commit of a new branch, then enter that branch."""
+        if not BRANCH_NAME.fullmatch(name):
+            raise StoreError("Invalid branch name")
+        if kind not in {"turn", "decision", "note"}:
+            raise StoreError("Unsupported commit kind")
+        with self._locked():
+            source = self.current_branch()
+            parent = self._read_ref(source)
+            usage_records = [] if usage is None else usage if isinstance(usage, list) else [usage]
+            if source != expected_branch or parent != expected_head:
+                for record in usage_records:
+                    self._append_usage({**record, "orphaned": True})
+                raise StoreError("Branch changed during the API call. Usage was recorded; retry on the current branch.")
+            if (self.data / "refs" / name).exists():
+                for record in usage_records:
+                    self._append_usage({**record, "orphaned": True})
+                raise StoreError(f"Branch already exists: {name}")
+            object_id = self._write_object({"schema": 1, "parent": parent, "kind": kind,
+                                            "timestamp": _now(), "payload": payload})
+            for record in usage_records:
+                self._append_usage({**record, "commit": object_id, "branch": name})
+            _atomic_write(self.data / "refs" / name, (object_id + "\n").encode("ascii"))
+            _atomic_write(self.data / "HEAD", (name + "\n").encode("ascii"))
+        return object_id
 
     def rewind(self, ref: str) -> str:
         """Move the current branch pointer; old objects and ledger entries stay intact."""
@@ -175,6 +205,7 @@ class Store:
         return target
 
     def commit(self, kind: str, payload: dict[str, Any], *, expected_head: str | None = None,
+               expected_branch: str | None = None,
                usage: dict[str, Any] | list[dict[str, Any]] | None = None) -> str:
         if kind not in {"turn", "decision", "note"}:
             raise StoreError("Unsupported commit kind")
@@ -182,7 +213,8 @@ class Store:
             branch = self.current_branch()
             parent = self._read_ref(branch)
             usage_records = [] if usage is None else usage if isinstance(usage, list) else [usage]
-            if expected_head is not None and parent != expected_head:
+            if ((expected_branch is not None and branch != expected_branch)
+                    or (expected_head is not None and parent != expected_head)):
                 for record in usage_records:
                     self._append_usage({**record, "orphaned": True})
                 raise StoreError("Branch changed during the API call. Usage was recorded; retry on the current branch.")

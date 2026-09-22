@@ -109,8 +109,9 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result["input_tokens"], 50)
         self.assertEqual(post.call_args.args[2]["questions"]["time_sensitive"]["type"], "noul")
         post.return_value["answers"]["time_sensitive"]["noul"] = 1.5
-        with self.assertRaises(ProviderError):
+        with self.assertRaises(ProviderError) as caught:
             triage_jev("Launch tomorrow")
+        self.assertEqual(caught.exception.usage["input_tokens"], 50)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
@@ -129,6 +130,17 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(plan.missing, ["state probabilities"])
         self.assertEqual(plan.context["provisional_view"], "Try a pilot")
         self.assertEqual(post.call_args.args[2]["text"]["format"]["type"], "json_schema")
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
+    @patch("pioneer.providers._post")
+    def test_unusable_openai_response_exposes_returned_usage(self, post):
+        post.return_value = {"id": "resp_bad", "model": "test-model", "output": [
+            {"content": [{"type": "output_text", "text": "not valid JSON"}]}],
+            "usage": {"input_tokens": 19, "output_tokens": 4}}
+        with self.assertRaises(ProviderError) as caught:
+            compose_turn([{"role": "user", "content": "Hello"}], model="test-model")
+        self.assertEqual(caught.exception.usage["input_tokens"], 19)
+        self.assertEqual(caught.exception.usage["response_id"], "resp_bad")
 
 
 class PipelineTests(unittest.TestCase):
@@ -158,6 +170,7 @@ class PipelineTests(unittest.TestCase):
                                        "openai-test", 50, 20, "resp_3")
         outcome = run_turn(self.store, text)
         self.assertEqual(outcome.decision["recommendation"]["kind"], "wait")
+        self.assertTrue(outcome.text.startswith("Here is the comparison."))
         self.assertIn("I would wait", outcome.text)
         self.assertEqual(len(self.store.log()), 2)
         self.assertEqual(len(self.store.usage()), 2)
@@ -189,6 +202,68 @@ class PipelineTests(unittest.TestCase):
         outcome = run_turn(self.store, "Good 50%, bad 50%. Invest pays 10 or -10; hold pays 0. Should I wait?")
         self.assertIsNone(outcome.decision)
         self.assertIn("Waiting could change the choice", outcome.text)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_wait_question_from_prior_turn_still_guards_calculation(self, compose):
+        context = {"status": "active", "goal": "Investment timing", "options": ["invest", "hold"],
+                   "known": [], "uncertain": ["outcome"], "provisional_view": "Wait for information",
+                   "next_questions": []}
+        case = {"states": {"good": 0.5, "bad": 0.5}, "actions": {
+            "invest": {"outcomes": {"good": 10, "bad": -10}},
+            "hold": {"outcomes": {"good": 0, "bad": 0}}}}
+        compose.side_effect = [
+            TurnPlan("What information could arrive?", True, None, [], "test", 10, 5, "r1", context),
+            TurnPlan("I have the payoffs.", True, json.dumps(case), [], "test", 20, 6, "r2", context),
+        ]
+        run_turn(self.store, "Should I wait before investing?")
+        outcome = run_turn(self.store, "Good 50%, bad 50%; invest pays 10 or -10, hold pays 0.")
+        self.assertIsNone(outcome.decision)
+        self.assertIn("Waiting could change the choice", outcome.text)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_new_goal_cannot_borrow_old_numbers(self, compose):
+        old = {"status": "active", "goal": "Old project", "options": ["go", "hold"],
+               "known": [], "uncertain": [], "provisional_view": "Unsure", "next_questions": []}
+        new = {**old, "goal": "New project"}
+        case = {"states": {"good": 0.9, "bad": 0.1}, "actions": {
+            "go": {"outcomes": {"good": 10, "bad": -10}},
+            "hold": {"outcomes": {"good": 0, "bad": 0}}}}
+        compose.side_effect = [
+            TurnPlan("Tell me more.", True, None, [], "test", 10, 5, "r1", old),
+            TurnPlan("I can calculate.", True, json.dumps(case), [], "test", 20, 6, "r2", new),
+        ]
+        run_turn(self.store, "For the old project, good is 90%, bad 10%; go pays 10 or -10 and hold pays 0.")
+        outcome = run_turn(self.store, "For a new project, should I go?")
+        self.assertIsNone(outcome.decision)
+        self.assertIn("can't trace every number", outcome.text)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_chat_sends_recent_turns_with_working_context(self, compose):
+        context = {"status": "active", "goal": "Timing", "options": [], "known": [],
+                   "uncertain": [], "provisional_view": "Unsure", "next_questions": []}
+        for index in range(25):
+            self.store.commit("turn", {"user": f"Old user {index}", "assistant": f"Old reply {index}",
+                                       "context": context})
+        compose.return_value = TurnPlan("Let's continue.", True, None, [], "test", 10, 5, "r3", context)
+        run_turn(self.store, "What now?")
+        sent = compose.call_args.args[0]
+        self.assertEqual(len(sent), 41)
+        self.assertEqual(sent[0]["content"], "Old user 5")
+        self.assertEqual(compose.call_args.kwargs["context"], context)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": "", "OPENAI_API_KEY": "test"})
+    @patch("pioneer.providers._post")
+    def test_failed_openai_turn_still_records_returned_usage(self, post):
+        post.return_value = {"id": "resp_bad", "model": "test-model", "output": [],
+                             "usage": {"input_tokens": 18, "output_tokens": 2}}
+        with self.assertRaises(ProviderError):
+            run_turn(self.store, "Should I launch?")
+        self.assertEqual(len(self.store.usage()), 1)
+        self.assertEqual(self.store.usage()[0]["input_tokens"], 18)
+        self.assertEqual(self.store.log()[0][1]["kind"], "note")
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")

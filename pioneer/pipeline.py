@@ -18,6 +18,11 @@ from .state import Store, StoreError
 NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?|(?<![\w\d])[-+]?\.\d+%?")
 WAIT_WORD = re.compile(r"\b(wait|waiting|delay|defer|postpone|hold off)\b", re.IGNORECASE)
 UNDO_WORD = re.compile(r"\b(undo|revert|reverse|reversible|rollback|roll back)\b", re.IGNORECASE)
+CONCLUSION_WORD = re.compile(
+    r"\b(recommend\w*|should|would|better|best|prefer\w*|highest|lowest|payoff|expected|wait|waiting|act|choose)\b",
+    re.IGNORECASE,
+)
+MAX_HISTORY_TURNS = 20
 
 
 @dataclass(frozen=True)
@@ -73,7 +78,8 @@ def _check_explicit_numbers(case: dict[str, Any], messages: list[dict[str, str]]
                             + ", ".join(f"{value:g}" for value in distinct[:8]))
 
 
-def _check_decision_scope(case: dict[str, Any], text: str) -> None:
+def _check_decision_scope(case: dict[str, Any], messages: list[dict[str, str]]) -> None:
+    text = "\n".join(message["content"] for message in messages if message["role"] == "user")
     actions = case.get("actions")
     if not isinstance(actions, dict) or len(actions) < 2:
         raise DecisionError("Please provide at least two actions, including doing nothing if it is a real option")
@@ -135,13 +141,33 @@ def format_analysis(case: dict[str, Any], result: dict[str, Any]) -> str:
     return " ".join(lines)
 
 
-def _last_context(store: Store) -> dict[str, Any] | None:
-    for _, obj in store.log():
+def _last_context(store: Store, branch: str) -> dict[str, Any] | None:
+    for _, obj in store.log(branch):
         if obj["kind"] == "turn":
             context = obj["payload"].get("context")
             if isinstance(context, dict):
                 return context
     return None
+
+
+def _decision_evidence(store: Store, branch: str, current: str, previous_context: dict[str, Any] | None,
+                       next_context: dict[str, Any] | None) -> list[dict[str, str]]:
+    """Keep numerical and scope checks inside the recent decision conversation."""
+    if (previous_context and next_context and previous_context.get("goal")
+            and next_context.get("goal") and previous_context["goal"] != next_context["goal"]):
+        return [{"role": "user", "content": current}]
+    prior: list[dict[str, str]] = []
+    for _, obj in store.log(branch):
+        if obj["kind"] != "turn":
+            continue
+        payload = obj["payload"]
+        context = payload.get("context")
+        if isinstance(context, dict) and context.get("status") == "none":
+            break
+        prior.append({"role": "user", "content": payload["user"]})
+        if len(prior) >= MAX_HISTORY_TURNS:
+            break
+    return list(reversed(prior)) + [{"role": "user", "content": current}]
 
 
 def _context_from_analysis(case: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -171,21 +197,31 @@ def _validation_reply(error: str) -> str:
     return "I can talk through the tradeoff, but I need to clear up one assumption before calculating: " + error
 
 
+def _analysis_framing(reply: str) -> str:
+    """Use only a short, nonnumeric preface before the verified calculation."""
+    framing = " ".join(reply.split())
+    if len(framing) > 180 or NUMBER.search(framing) or CONCLUSION_WORD.search(framing):
+        return ""
+    return framing
+
+
 def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcome:
     store.require()
     if not text.strip():
         raise StoreError("Message cannot be empty")
-    head = store.resolve()
-    previous_context = _last_context(store)
-    messages = store.messages() + [{"role": "user", "content": text}]
+    starting_branch = store.current_branch()
+    head = store.resolve(starting_branch)
+    previous_context = _last_context(store, starting_branch)
+    messages = store.messages(starting_branch)[-2 * MAX_HISTORY_TURNS:] + [{"role": "user", "content": text}]
     direct = _direct_case(text)
     if direct is not None:
         result = analyze(direct)
         answer = format_analysis(direct, result)
         object_id = store.commit("turn", {"user": text, "assistant": answer, "provider": "local",
                                           "context": _context_from_analysis(direct, result),
-                                          "decision": {"case": direct, "analysis": result}}, expected_head=head)
-        return TurnOutcome(answer, object_id, "local", [], result, store.current_branch())
+                                          "decision": {"case": direct, "analysis": result}},
+                                 expected_head=head, expected_branch=starting_branch)
+        return TurnOutcome(answer, object_id, "local", [], result, starting_branch)
 
     triage: dict[str, Any] | None = None
     triage_error: str | None = None
@@ -196,12 +232,16 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             usage.append(_usage("jev", triage))
         except ProviderError as exc:
             triage_error = str(exc)
+            if exc.usage:
+                usage.append(exc.usage)
     try:
         plan = compose_turn(messages, model=model, triage=triage, context=previous_context)
-    except ProviderError:
+    except ProviderError as exc:
+        if exc.usage:
+            usage.append(exc.usage)
         if usage:
             store.commit("note", {"title": "Incomplete turn", "text": text, "triage": triage},
-                         expected_head=head, usage=usage)
+                         expected_head=head, expected_branch=starting_branch, usage=usage)
         raise
     usage.append(_usage("openai", plan))
     decision_requested = plan.decision_requested or bool(plan.case_json)
@@ -214,29 +254,29 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             candidate = json.loads(plan.case_json)
             if not isinstance(candidate, dict):
                 raise DecisionError("Decision case must be a JSON object")
-            _check_explicit_numbers(candidate, messages)
-            _check_decision_scope(candidate, text)
+            evidence = _decision_evidence(store, starting_branch, text, previous_context, plan.context)
+            _check_explicit_numbers(candidate, evidence)
+            _check_decision_scope(candidate, evidence)
             result = analyze(candidate)
             case = candidate
-            reply = format_analysis(candidate, result)
+            summary = format_analysis(candidate, result)
+            framing = _analysis_framing(reply)
+            reply = f"{framing} {summary}" if framing else summary
         except (json.JSONDecodeError, DecisionError) as exc:
             validation_error = str(exc)
             reply = _validation_reply(validation_error)
     if not reply:
         questions = (plan.context or {}).get("next_questions", [])
         reply = " ".join(questions) if questions else "What part of this would you like to explore next?"
-    source_branch: str | None = None
-    if plan.explore_alternative and previous_context and previous_context.get("status") in {"active", "resolved"}:
-        branch_name = _branch_name(text)
-        source_branch = store.fork_and_switch(branch_name, head)
+    explore = plan.explore_alternative and previous_context and previous_context.get("status") in {"active", "resolved"}
     payload: dict[str, Any] = {"user": text, "assistant": reply, "provider": "openai", "model": plan.model,
                                "decision_requested": decision_requested}
     if case is not None and result is not None:
         payload["context"] = _context_from_analysis(case, result)
     elif plan.context:
         payload["context"] = plan.context
-    if source_branch:
-        payload["branched_from"] = source_branch
+    if explore:
+        payload["branched_from"] = starting_branch
     if triage:
         payload["triage"] = triage
     if triage_error:
@@ -248,5 +288,11 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         if validation_error:
             payload["draft_case"] = plan.case_json
             payload["validation_error"] = validation_error
-    object_id = store.commit("turn", payload, expected_head=head, usage=usage)
-    return TurnOutcome(reply, object_id, plan.model, usage, result, store.current_branch(), source_branch)
+    if explore:
+        branch_name = _branch_name(text)
+        object_id = store.fork_and_commit(branch_name, "turn", payload, expected_head=head,
+                                          expected_branch=starting_branch, usage=usage)
+        return TurnOutcome(reply, object_id, plan.model, usage, result, branch_name, starting_branch)
+    object_id = store.commit("turn", payload, expected_head=head,
+                             expected_branch=starting_branch, usage=usage)
+    return TurnOutcome(reply, object_id, plan.model, usage, result, starting_branch)

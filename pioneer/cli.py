@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,7 +44,7 @@ def _parser() -> argparse.ArgumentParser:
     decide = sub.add_parser("decide", help="Analyze and save a decision case from JSON")
     decide.add_argument("file")
     decide.add_argument("--no-save", action="store_true", help="Analyze without creating a commit")
-    triage = sub.add_parser("triage", help="Ask Jev for three narrow uncertainty judgments")
+    triage = sub.add_parser("triage", help="Ask Jev for four narrow uncertainty judgments")
     triage.add_argument("text", nargs="+")
     sub.add_parser("verify", help="Check stored object hashes, refs, and ledger links")
     return parser
@@ -102,13 +101,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-def _ask(store: Store, text: str, model: str | None = None) -> None:
+def _ask(store: Store, text: str, model: str | None = None, *, interactive: bool = False) -> None:
     outcome = run_turn(store, text, model=model)
     if outcome.branched_from:
-        print(f"Exploring on {outcome.branch} (from {outcome.branched_from}).")
-    print(f"\nPioneer | {outcome.branch} | {outcome.model} | {outcome.commit[:12]}\n{outcome.text}\n")
-    for record in outcome.usage:
-        print(f"{record['provider']}: {record['input_tokens']} input / {record['output_tokens']} output tokens")
+        print(f"Exploring on {outcome.branch}. Your conversation on {outcome.branched_from} is still there.")
+    print(f"Pioneer: {outcome.text}" if interactive else outcome.text)
 
 
 def _triage(store: Store, text: str) -> None:
@@ -182,59 +179,169 @@ def _usage(store: Store, prices_file: str | None) -> None:
         print("Cost estimate unavailable. Pass --prices FILE with rates per million tokens.")
 
 
+def _brief(value: Any, limit: int = 88) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
+
+
+def _latest_context(store: Store, ref: str | None = None) -> dict[str, Any] | None:
+    for _, obj in store.log(ref):
+        if obj["kind"] == "turn":
+            context = obj["payload"].get("context")
+            if isinstance(context, dict):
+                return context
+    return None
+
+
+def _topic(store: Store, ref: str | None = None) -> str | None:
+    for _, obj in store.log(ref):
+        payload = obj["payload"]
+        if obj["kind"] == "turn":
+            context = payload.get("context")
+            if isinstance(context, dict) and context.get("goal"):
+                return _brief(context["goal"])
+            return _brief(payload.get("user", "")) or None
+        if obj["kind"] == "decision":
+            return _brief(payload.get("title", "")) or None
+    return None
+
+
+def _orientation(store: Store) -> None:
+    branch = store.current_branch()
+    topic = _topic(store)
+    print(f"On {branch}" + (f" | {topic}" if topic else " | new conversation"))
+    context = _latest_context(store)
+    if context and context.get("provisional_view"):
+        print(f"Current view: {_brief(context['provisional_view'])}")
+
+
+def _print_context(store: Store) -> None:
+    context = _latest_context(store)
+    if context is None:
+        print("No working context on this branch yet. Tell Pioneer what you are considering.")
+        return
+    print(f"Working context on {store.current_branch()}:")
+    for key, label in (("goal", "Goal"), ("provisional_view", "Current view")):
+        if context.get(key):
+            print(f"  {label}: {_brief(context[key], 160)}")
+    for key, label in (("options", "Options"), ("known", "Known"),
+                       ("uncertain", "Still uncertain"), ("next_questions", "Possible follow-ups")):
+        values = context.get(key)
+        if isinstance(values, list) and values:
+            print(f"  {label}:")
+            for value in values:
+                print(f"    - {_brief(value, 160)}")
+
+
+def _required(argument: str, usage: str) -> str:
+    value = argument.strip()
+    if not value or any(character.isspace() for character in value):
+        raise StoreError(f"Use {usage}.")
+    return value
+
+
+def _file_argument(argument: str) -> str:
+    value = argument.strip()
+    if not value:
+        raise StoreError("Use /decide FILE.")
+    if value[0] in {'"', "'"}:
+        if len(value) < 2 or value[-1] != value[0]:
+            raise StoreError("Use /decide FILE (close the path's quote).")
+        value = value[1:-1]
+    return value
+
+
 def _chat(store: Store, model: str | None) -> None:
     store.require()
-    print("PIONEER | conversational terminal")
-    print(f"Branch {store.current_branch()} @ {store.resolve()[:12]} | /help for commands | /exit to leave")
+    print("Pioneer | Talk through a choice, or type /help for commands.")
+    _orientation(store)
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("Set OPENAI_API_KEY for conversation. Complete decision JSON still works locally.")
     while True:
         try:
-            line = input(f"\n{store.current_branch()} > ").strip()
+            line = input("\nYou: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
         if not line:
             continue
         try:
-            if line in {"/exit", "/quit"}:
+            parts = line.split(maxsplit=1)
+            command = parts[0]
+            argument = parts[1] if len(parts) == 2 else ""
+            if command in {"/exit", "/quit"} and not argument:
                 return
-            if line == "/help":
-                print("/branch NAME  /branches  /switch NAME  /log  /status  /usage  /analysis")
-                print("/decide FILE  /triage ACTION  /model MODEL  /exit")
-                continue
-            if line.startswith("/model "):
-                model = line[7:].strip()
-                print(f"Session model: {model}")
-            elif line.startswith("/branch "):
-                name = line[8:].strip()
-                print(f"Created {name} at {store.create_branch(name)[:12]}.")
-            elif line == "/branches":
+            if command == "/help" and not argument:
+                print("Type a message to continue the conversation. Commands:")
+                print("  /status                 Show the current branch and topic")
+                print("  /context                Show the saved working context")
+                print("  /branches               List conversations and their topics")
+                print("  /branch NAME            Copy this conversation to a new branch")
+                print("  /switch NAME            Continue on another branch")
+                print("  /log                    Show recent saved turns")
+                print("  /analysis               Show the latest full calculation")
+                print("  /usage                  Show recorded API token usage")
+                print("  /decide FILE            Calculate a decision from JSON")
+                print("  /triage ACTION          Ask Jev to assess an action")
+                print("  /model MODEL            Select a model for this session")
+                print("  /exit                   Leave the chat")
+            elif command == "/model":
+                if argument:
+                    model = _required(argument, "/model MODEL")
+                    print(f"Session model: {model}")
+                else:
+                    print(f"Session model: {model or os.environ.get('PIONEER_OPENAI_MODEL', 'gpt-6-astra')}")
+            elif command == "/branch":
+                name = _required(argument, "/branch NAME")
+                object_id = store.create_branch(name)
+                print(f"Created {name} at {object_id[:12]}. Type /switch {name} to continue there.")
+            elif command == "/branches" and not argument:
+                current = store.current_branch()
                 for name, object_id in store.branches().items():
-                    print(f"{'*' if name == store.current_branch() else ' '} {name:<20} {object_id[:12]}")
-            elif line.startswith("/switch "):
-                name = line[8:].strip()
-                print(f"Switched to {name} at {store.switch(name)[:12]}.")
-            elif line == "/log":
+                    topic = _topic(store, name)
+                    print(f"{'*' if name == current else ' '} {name:<20} {object_id[:12]}"
+                          + (f"  {_brief(topic, 55)}" if topic else ""))
+            elif command == "/switch":
+                name = _required(argument, "/switch NAME")
+                store.switch(name)
+                _orientation(store)
+            elif command == "/log" and not argument:
                 for object_id, obj in store.log()[:12]:
-                    print(f"{object_id[:12]}  {obj['kind']:<8}  {obj['timestamp']}")
-            elif line == "/status":
-                print(f"{store.current_branch()} @ {store.resolve()[:12]}")
-            elif line == "/usage":
+                    payload = obj["payload"]
+                    title = payload.get("user") or payload.get("title") or payload.get("text") or obj["kind"]
+                    print(f"{object_id[:12]}  {obj['kind']:<8}  {_brief(title, 72)}")
+            elif command == "/status" and not argument:
+                print(f"{store.current_branch()} @ {store.resolve()[:12]}  ({len(store.log()) - 1} saved entries)")
+                topic = _topic(store)
+                if topic:
+                    print(f"Topic: {topic}")
+                context = _latest_context(store)
+                if context and context.get("provisional_view"):
+                    print(f"Current view: {_brief(context['provisional_view'])}")
+            elif command == "/context" and not argument:
+                _print_context(store)
+            elif command == "/usage" and not argument:
                 _usage(store, None)
-            elif line == "/analysis":
+            elif command == "/analysis" and not argument:
                 for _, obj in store.log():
-                    decision = obj["payload"].get("decision")
+                    payload = obj["payload"]
+                    decision = payload.get("decision")
+                    if obj["kind"] == "decision":
+                        decision = {"case": payload["case"], "analysis": payload["analysis"]}
                     if decision:
                         print(json.dumps(decision, indent=2, ensure_ascii=False))
                         break
                 else:
                     print("No calculated decision on this branch yet.")
-            elif line.startswith("/decide "):
-                _decide(store, shlex.split(line[8:])[0])
-            elif line.startswith("/triage "):
-                _triage(store, line[8:])
-            elif line.startswith("/"):
-                print("Unknown command. Type /help.")
+            elif command == "/decide":
+                _decide(store, _file_argument(argument))
+            elif command == "/triage":
+                if not argument.strip():
+                    raise StoreError("Use /triage ACTION.")
+                _triage(store, argument)
+            elif command.startswith("/"):
+                print("Unknown command or extra argument. Type /help for commands.", file=sys.stderr)
             else:
-                _ask(store, line, model)
-        except (StoreError, ProviderError, DecisionError, OSError, json.JSONDecodeError, ValueError, IndexError) as exc:
+                _ask(store, line, model, interactive=True)
+        except (StoreError, ProviderError, DecisionError, OSError, json.JSONDecodeError, ValueError) as exc:
             print(f"Pioneer: {exc}", file=sys.stderr)
