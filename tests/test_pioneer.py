@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pioneer.decision import DecisionError, analyze
-from pioneer.history import MAX_EVIDENCE, MAX_TOTAL_CHARS, retrieve_history
+from pioneer.history import MAX_EVIDENCE, MAX_RECENT_CHARS, MAX_TOTAL_CHARS, recent_messages, retrieve_history
 from pioneer.pipeline import run_turn
 from pioneer.providers import ProviderError, TurnPlan, ask_openai, compose_turn, triage_jev
 from pioneer.state import Store, StoreError
@@ -339,6 +339,54 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn(secret, {item["commit"] for item in evidence})
         self.assertLessEqual(len(evidence), MAX_EVIDENCE)
         self.assertLessEqual(sum(len(item["quote"]) for item in evidence), MAX_TOTAL_CHARS)
+
+    def test_history_excerpt_includes_relevant_end_of_long_statement(self):
+        source_text = "Launch idea. " + "Background details. " * 100 + "Legal review must finish before launch."
+        source = self.store.commit("turn", {"user": source_text, "assistant": "Okay."})
+        for index in range(20):
+            self.store.commit("turn", {"user": f"Update {index}", "assistant": "Okay."})
+        evidence = retrieve_history(self.store, "main", "Has legal review finished before launch?")
+        item = next(item for item in evidence if item["commit"] == source)
+        self.assertIn("Legal review must finish", item["quote"])
+        self.assertIn(item["quote"], source_text)
+
+    def test_explicit_recall_can_reach_earliest_branch_turn(self):
+        source = self.store.commit("turn", {"user": "My first principle was to preserve reversibility.",
+                                           "assistant": "Understood."})
+        for index in range(20):
+            self.store.commit("turn", {"user": f"Unrelated update {index}", "assistant": "Okay."})
+        evidence = retrieve_history(self.store, "main", "What did I say at the beginning?")
+        self.assertEqual(evidence[0]["commit"], source)
+
+    def test_recent_context_has_character_budget_and_complete_pairs(self):
+        first = self.store.commit("turn", {"user": "Earlier launch budget was 97.",
+                                           "assistant": "A" * (MAX_RECENT_CHARS // 2)})
+        self.store.commit("turn", {"user": "Current plan is a pilot.",
+                                   "assistant": "B" * (MAX_RECENT_CHARS // 2)})
+        messages, count = recent_messages(self.store, "main")
+        self.assertEqual(count, 1)
+        self.assertEqual([item["role"] for item in messages], ["user", "assistant"])
+        self.assertEqual(messages[0]["content"], "Current plan is a pilot.")
+        self.assertLessEqual(sum(len(item["content"]) for item in messages), MAX_RECENT_CHARS)
+        evidence = retrieve_history(self.store, "main", "What was the earlier launch budget?", recent_turns=count)
+        self.assertEqual(evidence[0]["commit"], first)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_omitted_oversize_turn_does_not_supply_decision_numbers(self, compose):
+        self.store.commit("turn", {"user": "For launch, good is 90% and bad 10%.",
+                                   "assistant": "A" * (MAX_RECENT_CHARS + 1)})
+        case = {"states": {"good": 0.9, "bad": 0.1}, "actions": {
+            "launch": {"outcomes": {"good": 5, "bad": -5}},
+            "hold": {"outcomes": {"good": 0, "bad": 0}}}}
+        compose.return_value = TurnPlan("Here is the result.", True, json.dumps(case), [],
+                                        "test", 10, 5, "r")
+        current = "Should we launch? Launch pays 5 if good, -5 if bad; hold pays 0."
+        outcome = run_turn(self.store, current)
+        self.assertEqual(compose.call_args.args[0], [{"role": "user", "content": current}])
+        self.assertTrue(compose.call_args.kwargs["history_evidence"])
+        self.assertIsNone(outcome.decision)
+        self.assertIn("can't trace every number", outcome.text)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")

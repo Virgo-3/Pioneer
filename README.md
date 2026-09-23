@@ -11,7 +11,7 @@ Pioneer pairs conversational AI with Git-like conversation history and an explic
 Most AI chat tools give you one linear thread and no way to compare options side by side. Pioneer is built for decisions, not just conversation:
 
 - **Fork instead of overwrite.** Explore "what if I waited" or "what if I optimized for downside instead" on a separate branch — your original reasoning stays intact.
-- **No invented numbers.** Pioneer never fabricates probabilities, payoffs, or costs to force a calculation. If a number matters and you haven't supplied it, Pioneer asks instead of guessing.
+- **Checked calculations.** Pioneer accepts a conversational calculation only when its numbers trace to the current decision conversation. If a number matters and you haven't supplied it, Pioneer asks instead of calculating from a guess.
 - **Reversibility is explicit.** Undoing a decision often has its own cost and its own recovered value. Pioneer models that directly rather than folding it into a vague "risk" label.
 - **Everything is checkable.** Every stored turn is SHA-256 addressed, so you can verify your history hasn't been corrupted or altered.
 
@@ -28,7 +28,7 @@ Most AI chat tools give you one linear thread and no way to compare options side
 - **Usage ledger** — track OpenAI/Jev token usage, with optional cost estimation
 - **Local decision engine** — analyze structured decision cases with no API call at all
 
-For conversation, Pioneer sends the latest 20 turns and its compact working context to OpenAI. It also searches older user turns on the active branch and includes up to five relevant quotations in the same request. If the model identifies a material conflict, Pioneer checks that the quoted text and commit really exist in the retrieved history before showing the challenge. Older quotations do not supply numbers to the decision engine. The search uses word overlap, so it can miss a relevant statement phrased differently; the model can also misjudge whether a change of view is a conflict.
+For conversation, Pioneer sends up to the latest 20 complete turns, capped at 24,000 characters of prior messages, plus its compact working context to OpenAI. It searches older user turns on the active branch and includes up to five relevant quotations in the same request. When asked to recall earlier history, it can also retrieve old turns without a topic keyword. If the model identifies a material conflict, Pioneer checks that the quoted text and commit really exist in the retrieved history before showing the challenge. Omitted or older quotations do not supply numbers to the decision engine. The search uses word overlap, so it can miss a relevant statement phrased differently; the model can also misjudge whether a change of view is a conflict.
 
 ## Requirements
 
@@ -71,7 +71,7 @@ export PIONEER_JEV_MODEL="your-jev-model"
 
 ## Windows executable
 
-Download `Pioneer.exe` from the [latest release](https://github.com/Virgo-3/Pioneer/releases/latest) and double click it. The first launch creates a workspace under `%LOCALAPPDATA%\Pioneer\workspace`. Copy your OpenAI API key, return to Pioneer, and press Enter: it reads the key from the clipboard without displaying it. You can also choose `H` to type with hidden input, `V` to paste into a visible field, or `O` for offline decision tools. If you choose to save the key, Windows encrypts it for your user account under `%APPDATA%\Pioneer\openai-key.dpapi`. An existing `OPENAI_API_KEY` takes precedence. Python is not needed to run the executable.
+Download `Pioneer.exe` from the [latest release](https://github.com/Virgo-3/Pioneer/releases/latest) and double click it. The first launch creates a workspace under `%LOCALAPPDATA%\Pioneer\workspace`. Copy your OpenAI API key, return to Pioneer, and press Enter: it reads the key from the clipboard without displaying it. You can also paste an `sk-` key at the first prompt, choose `H` to type with hidden input, `V` to paste into a visible field, or `O` for offline decision tools. A directly pasted key may be visible in the terminal. If you choose to save the key, Windows encrypts it for your user account under `%APPDATA%\Pioneer\openai-key.dpapi`. Later `Pioneer.exe chat` and `Pioneer.exe ask` commands use that saved key too. An existing `OPENAI_API_KEY` takes precedence. Python is not needed to run the executable.
 
 Run `Pioneer.exe --help` in a terminal for the full CLI. With arguments, it behaves like the Python CLI and uses the current directory unless you pass `--repo PATH`. The optional Jev triage still uses `TYPESAFE_API_KEY` from your environment. The Windows build is made by [GitHub Actions](https://github.com/Virgo-3/Pioneer/actions/workflows/windows-exe.yml), which also provides a downloadable build artifact on every push.
 
@@ -232,6 +232,8 @@ When a case includes a `wait` section, Pioneer computes both:
 2. the expected value of waiting for the signal and choosing afterward.
 
 The output reports the **value of information**, waiting costs, the preferred action under each possible signal, and the maximum combined waiting cost before acting immediately wins out.
+
+The calculation assumes the same actions remain available after waiting. It treats reversal as a choice after the true outcome is known. Cases with different timing or reversal rules need a different model. Misspelled or unsupported case fields are rejected rather than ignored.
 
 ### Reversible actions
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import time
 from ctypes import wintypes
 from pathlib import Path
 
@@ -17,6 +18,16 @@ class _DataBlob(ctypes.Structure):
 def credential_path() -> Path:
     roaming = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
     return roaming / "Pioneer" / "openai-key.dpapi"
+
+
+def _open_clipboard(user32: object) -> None:
+    # A copy operation can briefly leave the Windows clipboard locked.
+    for attempt in range(5):
+        if user32.OpenClipboard(None):
+            return
+        if attempt < 4:
+            time.sleep(0.05)
+    raise ctypes.WinError(ctypes.get_last_error())
 
 
 def read_clipboard_text() -> str | None:
@@ -37,8 +48,7 @@ def read_clipboard_text() -> str | None:
     kernel32.GlobalLock.restype = ctypes.c_void_p
     kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
     kernel32.GlobalUnlock.restype = wintypes.BOOL
-    if not user32.OpenClipboard(None):
-        raise ctypes.WinError(ctypes.get_last_error())
+    _open_clipboard(user32)
     try:
         if not user32.IsClipboardFormatAvailable(13):  # CF_UNICODETEXT
             return None

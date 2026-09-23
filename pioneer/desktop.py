@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .cli import main as cli_main
-from .state import Store
+from .state import Store, StoreError
 from .windows_credentials import load_openai_key, read_clipboard_text, save_openai_key
 
 
@@ -17,22 +17,31 @@ def workspace_path() -> Path:
     return local / "Pioneer" / "workspace"
 
 
-def _setup_key() -> None:
+def _load_saved_key(*, report_error: bool = False) -> bool:
     if os.environ.get("OPENAI_API_KEY"):
-        return
+        return True
     try:
         saved = load_openai_key()
     except (OSError, UnicodeError) as exc:
-        print(f"Saved OpenAI key could not be opened ({exc}). Enter a new one below.")
-        saved = None
-    if saved:
+        if report_error:
+            print(f"Saved OpenAI key could not be opened ({exc}). Enter a new one below.")
+        return False
+    if saved and not any(character.isspace() for character in saved):
         os.environ["OPENAI_API_KEY"] = saved
+        return True
+    return False
+
+
+def _setup_key() -> None:
+    if _load_saved_key(report_error=True):
         return
-    print("To connect OpenAI, copy your API key first. Pioneer will not display it.")
-    print("Press Enter to use the clipboard, H to type hidden, V for visible paste, or O for offline tools.")
+    print("To connect OpenAI, copy your API key first. Pioneer will not print it.")
+    print("Press Enter for clipboard, H to type hidden, V to paste visibly, or O for offline tools.")
+    print("You can also paste an sk- key here directly; your terminal may display it as you paste.")
     while True:
         try:
-            choice = input("Key entry [clipboard]: ").strip().lower()
+            entry = input("Key entry [clipboard]: ").strip()
+            choice = entry.lower()
             if choice in {"", "p"}:
                 try:
                     key = (read_clipboard_text() or "").strip()
@@ -50,8 +59,10 @@ def _setup_key() -> None:
                 key = input("OpenAI API key: ").strip()
             elif choice in {"o", "offline"}:
                 return
+            elif entry.startswith("sk-"):
+                key = entry
             else:
-                print("Choose Enter, H, V, or O.")
+                print("Choose Enter, H, V, or O, or paste a key beginning with sk-.")
                 continue
         except (EOFError, KeyboardInterrupt):
             print()
@@ -75,14 +86,38 @@ def _setup_key() -> None:
             print(f"Could not save key ({exc}). It will work for this session.")
 
 
+def _needs_openai_key(args: list[str]) -> bool:
+    """Identify the CLI command without mistaking a --repo path for one."""
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument == "--":
+            return index + 1 < len(args) and args[index + 1] in {"chat", "ask"}
+        if argument == "--repo":
+            index += 2
+            continue
+        if argument.startswith("--repo="):
+            index += 1
+            continue
+        return argument in {"chat", "ask"}
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if args:
+        # Conversational CLI commands use the same saved credential as double-click chat.
+        if _needs_openai_key(args):
+            _load_saved_key()
         return cli_main(args)
-    store = Store(workspace_path())
-    if not store.exists:
-        store.init()
-        print(f"Your Pioneer workspace is ready at {store.root}.")
+    try:
+        store = Store(workspace_path())
+        if not store.exists:
+            store.init()
+            print(f"Your Pioneer workspace is ready at {store.root}.")
+    except (OSError, StoreError) as exc:
+        print(f"Pioneer could not open its workspace: {exc}", file=sys.stderr)
+        return 1
     _setup_key()
     return cli_main(["--repo", str(store.root), "chat"])
 

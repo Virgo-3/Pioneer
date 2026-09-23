@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .decision import DecisionError, analyze
-from .history import RECENT_TURNS, retrieve_history, verified_conflict
+from .history import recent_messages, retrieve_history, verified_conflict
 from .providers import ProviderError, compose_turn, triage_jev
 from .state import Store, StoreError
 
@@ -23,7 +23,6 @@ CONCLUSION_WORD = re.compile(
     r"\b(recommend\w*|should|would|better|best|prefer\w*|highest|lowest|payoff|expected|wait|waiting|act|choose)\b",
     re.IGNORECASE,
 )
-MAX_HISTORY_TURNS = RECENT_TURNS
 
 
 @dataclass(frozen=True)
@@ -152,8 +151,10 @@ def _last_context(store: Store, branch: str) -> dict[str, Any] | None:
 
 
 def _decision_evidence(store: Store, branch: str, current: str, previous_context: dict[str, Any] | None,
-                       next_context: dict[str, Any] | None) -> list[dict[str, str]]:
+                       next_context: dict[str, Any] | None, recent_turns: int) -> list[dict[str, str]]:
     """Keep numerical and scope checks inside the recent decision conversation."""
+    if not recent_turns:
+        return [{"role": "user", "content": current}]
     if (previous_context and next_context and previous_context.get("goal")
             and next_context.get("goal") and previous_context["goal"] != next_context["goal"]):
         return [{"role": "user", "content": current}]
@@ -166,7 +167,7 @@ def _decision_evidence(store: Store, branch: str, current: str, previous_context
         if isinstance(context, dict) and context.get("status") == "none":
             break
         prior.append({"role": "user", "content": payload["user"]})
-        if len(prior) >= MAX_HISTORY_TURNS:
+        if len(prior) >= recent_turns:
             break
     return list(reversed(prior)) + [{"role": "user", "content": current}]
 
@@ -213,7 +214,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
     starting_branch = store.current_branch()
     head = store.resolve(starting_branch)
     previous_context = _last_context(store, starting_branch)
-    messages = store.messages(starting_branch)[-2 * MAX_HISTORY_TURNS:] + [{"role": "user", "content": text}]
+    recent, recent_turns = recent_messages(store, starting_branch)
+    messages = recent + [{"role": "user", "content": text}]
     direct = _direct_case(text)
     if direct is not None:
         result = analyze(direct)
@@ -224,7 +226,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                                  expected_head=head, expected_branch=starting_branch)
         return TurnOutcome(answer, object_id, "local", [], result, starting_branch)
 
-    history_evidence = retrieve_history(store, starting_branch, text, previous_context)
+    history_evidence = retrieve_history(store, starting_branch, text, previous_context, recent_turns)
     triage: dict[str, Any] | None = None
     triage_error: str | None = None
     usage: list[dict[str, Any]] = []
@@ -257,7 +259,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             candidate = json.loads(plan.case_json)
             if not isinstance(candidate, dict):
                 raise DecisionError("Decision case must be a JSON object")
-            evidence = _decision_evidence(store, starting_branch, text, previous_context, plan.context)
+            evidence = _decision_evidence(store, starting_branch, text, previous_context, plan.context,
+                                          recent_turns)
             _check_explicit_numbers(candidate, evidence)
             _check_decision_scope(candidate, evidence)
             result = analyze(candidate)
