@@ -1,6 +1,70 @@
 # Pioneer
 
-Pioneer is a conversational AI terminal with branchable local history, API token accounting, and a transparent decision engine. Talk through a choice in ordinary language: Pioneer can offer a provisional view, ask a focused follow-up when it matters, or calculate act versus wait from explicit numbers. Each turn saves the conversation, working context, analysis, and provider usage together.
+**A branchable conversational AI terminal for reasoning through decisions — without losing the paths you didn't take.**
+
+Pioneer pairs conversational AI with Git-like conversation history and an explicit decision-analysis engine. Fork a conversation to explore an alternative, weigh acting now against waiting for more information, model what's reversible, track API spend, and verify that your local history hasn't been tampered with.
+
+> Pioneer stores its own content-addressed history in `.pioneer/`. It does not depend on Git.
+
+## Why Pioneer
+
+Most AI chat tools give you one linear thread and no way to compare options side by side. Pioneer is built for decisions, not just conversation:
+
+- **Fork instead of overwrite.** Explore "what if I waited" or "what if I optimized for downside instead" on a separate branch — your original reasoning stays intact.
+- **No invented numbers.** Pioneer never fabricates probabilities, payoffs, or costs to force a calculation. If a number matters and you haven't supplied it, Pioneer asks instead of guessing.
+- **Reversibility is explicit.** Undoing a decision often has its own cost and its own recovered value. Pioneer models that directly rather than folding it into a vague "risk" label.
+- **Everything is checkable.** Every stored turn is SHA-256 addressed, so you can verify your history hasn't been corrupted or altered.
+
+## Features
+
+- **Branchable conversations** — fork, explore, and return to the original path later
+- **Persistent working context** — goal, options, known facts, uncertainties, and provisional view, tracked automatically
+- **Explicit decision analysis** — compare actions using states, probabilities, payoffs, costs, and reversible outcomes
+- **Value of information** — weigh acting now against waiting for a signal
+- **Reversibility modeling** — account for what's recoverable if an action is later undone
+- **Optional Jev triage** — use TypeSafe System One to flag whether a decision is time-sensitive, hard to reverse, or missing key information
+- **Content-addressed history** — SHA-256-hashed objects, checkable for corruption or tampering
+- **Usage ledger** — track OpenAI/Jev token usage, with optional cost estimation
+- **Local decision engine** — analyze structured decision cases with no API call at all
+
+## Requirements
+
+- Python **3.10+**
+- An OpenAI API key (for `chat` and `ask`)
+- Optionally, a TypeSafe API key (for Jev triage)
+
+Pioneer has no third-party Python package dependencies.
+
+## Installation
+
+```bash
+git clone https://github.com/Virgo-3/Pioneer.git
+cd Pioneer
+python -m pip install -e .
+```
+
+This installs the `pioneer` command. You can also run it as a module:
+
+```bash
+python -m pioneer
+```
+
+## Configuration
+
+Pioneer reads configuration from environment variables:
+
+```bash
+export OPENAI_API_KEY="your-openai-api-key"
+
+# Optional: enables Jev triage
+export TYPESAFE_API_KEY="your-typesafe-api-key"
+
+# Optional model overrides
+export PIONEER_OPENAI_MODEL="your-openai-model"
+export PIONEER_JEV_MODEL="your-jev-model"
+```
+
+`.env.example` is included as a reference, but Pioneer does **not** load `.env` files automatically — export these yourself or use your preferred environment manager.
 
 ## Windows executable
 
@@ -10,70 +74,332 @@ Run `Pioneer.exe --help` in a terminal for the full CLI. With arguments, it beha
 
 ## Python quick start
 
-Python 3.10 or newer is required. No runtime packages are needed.
-
-```sh
-python -m pioneer init
-python -m pioneer chat
+```bash
+mkdir my-decision
+cd my-decision
+pioneer init
 ```
 
-Set `OPENAI_API_KEY` in your environment to enable chat. Set `TYPESAFE_API_KEY` to include Jev triage in each conversation turn. Pioneer never saves keys in the workspace. You can select models with `PIONEER_OPENAI_MODEL` and `PIONEER_JEV_MODEL` (defaults: `gpt-6-astra` and `jev-latest`), or use `pioneer chat --model MODEL`. A complete decision case pasted as JSON into chat runs locally, even without API keys.
+Start an interactive conversation:
 
-You can also install the command locally with `python -m pip install -e .`, then use `pioneer` instead of `python -m pioneer`. Start it from the directory whose history you want to keep, or pass `--repo PATH` before a command.
-
-## Conversation and branches
-
-```sh
-python -m pioneer ask "What are our options?"
-python -m pioneer branch cautious
-python -m pioneer switch cautious
-python -m pioneer ask "Explore the smallest reversible experiment."
-python -m pioneer log
-python -m pioneer branch
-python -m pioneer status
-python -m pioneer verify
+```bash
+pioneer chat
 ```
 
-In `chat`, type a message normally. Replies appear as a simple `You:` / `Pioneer:` exchange; `/status` and `/usage` show the saved details when you want them. Pioneer uses a branch-local working context to remember the goal, options, known facts, open questions, and provisional view. It should answer when it can, ask a pivotal question when the answer could change advice, and group closely related questions when that is easier. It does not demand a numerical matrix for a qualitative conversation. If you clearly ask to explore an alternative, such as “What if we launch anyway?”, it saves the turn on a new `explore-...` branch and enters it while preserving the original. Slash commands include `/branch NAME`, `/branches`, `/switch NAME`, `/log`, `/status`, `/context`, `/usage`, `/analysis`, `/decide FILE`, `/triage ACTION`, `/model MODEL`, and `/exit`.
+```text
+Pioneer | Talk through a choice, or type /help for commands.
+On main | new conversation
 
-For example, a discussion can start with “Should we launch or run a pilot?” Pioneer may explain why a pilot is easier to reverse and ask how long it would take. If you later provide probabilities, payoffs, and the quality and cost of a future signal, it can calculate the choice. Its reply is a short explanation; `/analysis` shows the full saved case and calculation. These are model-guided conversation choices, so the wording will vary.
-
-Each turn is an immutable, hash-verified object under `.pioneer/objects/`. Branches are pointers to those objects. `pioneer branch NAME --from REF` creates a branch at an existing branch or full commit ID. `pioneer rewind REF` moves the current branch and first creates a named rescue branch at its old head. Chat sends the latest 20 turns from the active branch plus its compact working context to OpenAI, keeping long sessions bounded. If a numerical detail is older than those turns, restate it before asking for a calculation. Decision records and triage notes stay in the history but do not become model chat messages.
-
-`.pioneer/` is excluded from the project's Git repository by default because it may contain private conversation content. It can be backed up separately. The app's history is content-addressed, but it is not a replacement for Git version control of source files.
-
-## Usage accounting
-
-```sh
-python -m pioneer usage
-python -m pioneer usage --prices examples/prices.example.json
+You: I'm deciding whether to launch now or run a smaller pilot first.
 ```
 
-The append-only `.pioneer/usage.jsonl` records provider-returned input and output tokens. A turn using both providers creates two ledger entries linked to one conversation commit. If an API returns usage but an unusable reply, Pioneer saves an incomplete-turn note with that usage. Usage stays in the ledger after a rewind or branch change, so branch totals cannot make spent API calls disappear. If the branch changes while a request is in flight, Pioneer records its usage as orphaned and asks you to retry. Dollar cost is shown only when you supply a JSON price card with `input_per_million` and `output_per_million` for the exact returned model name. Update that card from your provider's current rates; estimates do not include discounts, taxes, or provider adjustments.
+Every turn is saved into `.pioneer/`.
 
-## Decide under uncertainty
+For a single non-interactive turn:
 
-```sh
-python -m pioneer decide examples/launch-decision.json
-python -m pioneer decide examples/launch-decision.json --no-save
-python -m pioneer triage "Launch the new feature to all users tomorrow"
+```bash
+pioneer ask "Should I launch now or run a pilot first?"
 ```
 
-The decision case has mutually exclusive `states` with priors summing to 1. Each `action` gives a payoff in each state and may have an upfront `cost`. An outcome can include an `undo` payoff and `undo_cost`; Pioneer chooses reversal in that state only if its net payoff is better. Include a `hold` action if doing nothing should remain available.
+Use a specific model for a session or a single request:
 
-Optional `wait.signals` describes `P(signal | state)` for each state, with likelihoods summing to 1 across signals. After each signal, Pioneer applies Bayes' rule and picks the best available action. Its value of information is the expected best payoff after the signal minus the best payoff now. The value of waiting subtracts `delay_cost` and `information_cost`. All payoffs and costs must use the same unit. If waiting wins, the engine recommends waiting; ties favor acting now. Its output includes the break-even total wait cost and the planned action for each signal.
+```bash
+pioneer chat --model MODEL
+pioneer ask "Help me think through this decision" --model MODEL
+```
 
-The tool does not infer true state probabilities or execute a recommended action. Jev triage probabilities describe the proposed action text and working context; they are **not** fed into the decision case as outcome probabilities. OpenAI can draft a case from the current decision conversation, but Pioneer calculates only if every numeric input appears in a recent user message and the case passes mathematical validation. It carries a request to compare waiting or reversal across follow-up turns, rather than dropping that part of the choice. Without complete numbers it can still discuss a provisional choice and its conditions. Review the saved assumptions with `/analysis`: matching numbers alone cannot prove the model assigned them to the right states or actions. Saved analyses are part of the conversation commit on the current branch, so you can compare changed assumptions without overwriting the earlier case.
+## Branching conversations
 
-## API contracts
+A Pioneer conversation is a history that can branch.
 
-- OpenAI conversation uses the [Responses API](https://developers.openai.com/api/docs/guides/text) with [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs), `store: false`, and the active branch's user and assistant messages. Token counts come from the response's `usage` object.
-- Jev triage uses TypeSafe's [System One API](https://docs.typesafe.ai/api) with four `noul` questions in one request. The result includes named probabilities and token usage. Jev is optional; local decision analysis works without either API key.
+```bash
+pioneer branch conservative-plan
+pioneer switch conservative-plan
+pioneer ask "Suppose I optimize for minimizing downside instead."
+pioneer switch main
+```
 
-## Tests
+List branches:
 
-```sh
+```bash
+pioneer branch
+```
+
+Pioneer can also branch automatically when a turn explicitly explores an alternative or counterfactual — the original conversation is left untouched.
+
+### Rewinding
+
+```bash
+pioneer log
+pioneer rewind <commit-id>
+```
+
+Before rewinding, Pioneer creates a rescue branch pointing at the previous head, so the displaced history stays accessible.
+
+## Interactive commands
+
+Inside `pioneer chat`, type `/help` to see these:
+
+| Command | Description |
+| --- | --- |
+| `/status` | Show the current branch and topic |
+| `/context` | Show the saved working context |
+| `/branches` | List conversations and their topics |
+| `/branch NAME` | Copy the current conversation to a new branch |
+| `/switch NAME` | Continue on another branch |
+| `/log` | Show recent saved turns |
+| `/analysis` | Show the latest complete decision calculation |
+| `/usage` | Show recorded API token usage |
+| `/decide FILE` | Analyze a structured decision case |
+| `/triage ACTION` | Ask Jev to assess an action |
+| `/model MODEL` | Change the OpenAI model for this session |
+| `/exit` | Leave the interactive terminal |
+
+## Decision analysis
+
+Pioneer's decision engine is deterministic: give it explicit quantities, and it will calculate rather than guess.
+
+A case defines:
+
+- mutually exclusive states and prior probabilities
+- available actions
+- the payoff of each action in each state
+- optional action costs
+- optional reversal values and reversal costs
+- optionally, an informative signal and the cost of waiting for it
+
+Example:
+
+```json
+{
+  "title": "Ship now or pilot first",
+  "units": "utility points",
+  "states": {
+    "strong_demand": 0.4,
+    "weak_demand": 0.6
+  },
+  "actions": {
+    "ship": {
+      "cost": 2,
+      "outcomes": {
+        "strong_demand": { "payoff": 16 },
+        "weak_demand": { "payoff": -10, "undo": -4, "undo_cost": 2 }
+      }
+    },
+    "pilot": {
+      "cost": 1,
+      "outcomes": {
+        "strong_demand": { "payoff": 7 },
+        "weak_demand": { "payoff": -1 }
+      }
+    }
+  },
+  "wait": {
+    "delay_cost": 1,
+    "information_cost": 0.5,
+    "signals": {
+      "positive": { "strong_demand": 0.8, "weak_demand": 0.2 },
+      "negative": { "strong_demand": 0.2, "weak_demand": 0.8 }
+    }
+  }
+}
+```
+
+```bash
+pioneer decide decision.json
+```
+
+Calculate without saving to the workspace:
+
+```bash
+pioneer decide decision.json --no-save
+```
+
+A full example lives at `examples/launch-decision.json`.
+
+### Acting now vs. waiting
+
+When a case includes a `wait` section, Pioneer computes both:
+
+1. the expected value of the best action available now, and
+2. the expected value of waiting for the signal and choosing afterward.
+
+The output reports the **value of information**, waiting costs, the preferred action under each possible signal, and the maximum combined waiting cost before acting immediately wins out.
+
+### Reversible actions
+
+An outcome can specify what remains after reversal:
+
+```json
+{ "payoff": -10, "undo": -3, "undo_cost": 1 }
+```
+
+Reversal is treated as an **option**, not an automatic penalty — Pioneer only uses it when reversing beats leaving the outcome in place.
+
+All payoffs, costs, undo values, and delay costs must share the same units.
+
+## Numerical guardrails
+
+When Pioneer builds a decision case from conversation, it checks that every number traces back to something you actually said. It will not silently invent:
+
+- state probabilities
+- payoffs
+- signal accuracy
+- delay or information costs
+- do-nothing values
+- reversal values
+
+If a calculation is missing a material assumption, Pioneer returns to the conversation to ask rather than calculating from a fabricated number.
+
+## Jev triage
+
+With `TYPESAFE_API_KEY` set, Pioneer can use TypeSafe System One / Jev as an additional routing signal:
+
+```bash
+pioneer triage "Launch the product tomorrow"
+```
+
+Jev scores four questions — decision request, time sensitive, hard to reverse, missing information. These are judgments about how the decision is *described*, not outcome probabilities, and they are never inserted into numerical decision cases.
+
+Conversation and decision analysis both work fine without Jev.
+
+## History and storage
+
+Each workspace has a `.pioneer/` directory:
+
+```text
+.pioneer/
+├── HEAD
+├── objects/
+├── refs/
+└── usage.jsonl
+```
+
+Turns, decisions, and notes are stored as immutable JSON objects. Each object's ID is the SHA-256 hash of its own contents, and branches are lightweight refs pointing at those objects — giving Pioneer Git-like properties without depending on Git internals:
+
+```text
+main
+  │
+  A ── B ── C
+       │
+       └── D ── E   explore-alternative
+```
+
+Different branches can hold different histories from the same starting point.
+
+## Inspecting history
+
+```bash
+pioneer log                    # recent commits
+pioneer log --ref alternative  # another branch
+pioneer log --limit 5          # limit output
+
+pioneer show <commit-id>       # full JSON for a commit
+pioneer show                   # ...or just the current head
+
+pioneer status                 # current position
+```
+
+## Integrity verification
+
+```bash
+pioneer verify
+```
+
+Checks stored object hashes, branch references, history links, and usage-ledger references. A successful run reports how many objects, branches, and usage entries were verified.
+
+## API usage
+
+```bash
+pioneer usage
+```
+
+To estimate cost, supply a JSON price card (price per million tokens):
+
+```json
+{
+  "my-openai-model": {
+    "input_per_million": 1.0,
+    "output_per_million": 4.0
+  }
+}
+```
+
+```bash
+pioneer usage --prices prices.json
+```
+
+A template is at `examples/prices.example.json`.
+
+## CLI reference
+
+```text
+pioneer [--repo DIR] init
+pioneer [--repo DIR] chat [--model MODEL]
+pioneer [--repo DIR] ask TEXT... [--model MODEL]
+
+pioneer [--repo DIR] branch [NAME] [--from REF]
+pioneer [--repo DIR] switch NAME
+pioneer [--repo DIR] rewind REF
+
+pioneer [--repo DIR] log [--ref REF] [--limit N]
+pioneer [--repo DIR] show [REF]
+pioneer [--repo DIR] status
+
+pioneer [--repo DIR] decide FILE [--no-save]
+pioneer [--repo DIR] triage TEXT...
+
+pioneer [--repo DIR] usage [--prices FILE]
+pioneer [--repo DIR] verify
+```
+
+`--repo` operates on a workspace outside the current directory:
+
+```bash
+pioneer --repo ~/decisions/product-launch status
+```
+
+## Project structure
+
+```text
+Pioneer/
+├── pioneer/
+│   ├── cli.py         # CLI and interactive terminal
+│   ├── decision.py    # deterministic decision engine
+│   ├── pipeline.py    # conversational turn pipeline
+│   ├── providers.py   # OpenAI and Jev HTTP adapters
+│   └── state.py       # content-addressed workspace storage
+├── examples/
+│   ├── launch-decision.json
+│   └── prices.example.json
+├── tests/
+│   ├── test_cli.py
+│   ├── test_pioneer.py
+│   └── test_state_integrity.py
+└── pyproject.toml
+```
+
+## Development
+
+```bash
+python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-Tests use mocked provider responses, so they require no keys or paid API calls.
+CI runs the test suite on Python 3.10 and Python 3.13.
+
+## Design principles
+
+**Conversation should be forkable.** Exploring an alternative shouldn't overwrite the reasoning that led to your current view.
+
+**Calculations should be inspectable.** A numerical recommendation should come from an explicit case, not a hidden assumption.
+
+**Uncertainty should stay visible.** Pioneer keeps user-supplied facts, unresolved assumptions, qualitative reasoning, and deterministic calculations distinct from one another.
+
+**Waiting is an action.** When information might arrive later, the real comparison often isn't action A vs. action B — it's whether learning before acting is worth what it costs.
+
+**Reversibility matters.** The ability to undo a decision changes its downside. That should be represented explicitly, not gestured at.
+
+## License
+
+No license file is currently included in this repository.
