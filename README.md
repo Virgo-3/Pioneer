@@ -23,7 +23,7 @@ Most AI chat tools give you one linear thread and no way to compare options side
 - **Explicit decision analysis** — compare actions using states, probabilities, payoffs, costs, and reversible outcomes
 - **Value of information** — weigh acting now against waiting for a signal
 - **Reversibility modeling** — account for what's recoverable if an action is later undone
-- **Optional Jev triage** — use TypeSafe System One to flag whether a decision is time-sensitive, hard to reverse, or missing key information
+- **Optional Jev decision attention** — use TypeSafe System One to help Pioneer focus on timing, reversibility, useful information, and tensions with earlier claims
 - **Content-addressed history** — SHA-256-hashed objects, checkable for corruption or tampering
 - **Usage ledger** — track OpenAI/Jev token usage, with optional cost estimation
 - **Local decision engine** — analyze structured decision cases with no API call at all
@@ -34,7 +34,7 @@ For conversation, Pioneer sends up to the latest 20 complete turns, capped at 24
 
 - Python **3.10+** for installation from source; the Windows executable includes Python
 - An OpenAI API key (for `chat` and `ask`)
-- Optionally, a TypeSafe API key (for Jev triage)
+- Optionally, a TypeSafe API key (for Jev decision attention)
 
 Pioneer has no third-party Python package dependencies.
 
@@ -59,7 +59,7 @@ Pioneer reads configuration from environment variables:
 ```bash
 export OPENAI_API_KEY="your-openai-api-key"
 
-# Optional: enables Jev triage
+# Optional: enables Jev's decision attention inside conversation
 export TYPESAFE_API_KEY="your-typesafe-api-key"
 
 # Optional model overrides
@@ -73,7 +73,7 @@ export PIONEER_JEV_MODEL="your-jev-model"
 
 Download `Pioneer.exe` from the [latest release](https://github.com/Virgo-3/Pioneer/releases/latest) and double click it. The first launch creates a workspace under `%LOCALAPPDATA%\Pioneer\workspace`. Copy your OpenAI API key, return to Pioneer, and press Enter: it reads the key from the clipboard without displaying it. You can also paste an `sk-` key at the first prompt, choose `H` to type with hidden input, `V` to paste into a visible field, or `O` for offline decision tools. A directly pasted key may be visible in the terminal. If you choose to save the key, Windows encrypts it for your user account under `%APPDATA%\Pioneer\openai-key.dpapi`. Later `Pioneer.exe chat` and `Pioneer.exe ask` commands use that saved key too. An existing `OPENAI_API_KEY` takes precedence. Python is not needed to run the executable.
 
-Run `Pioneer.exe --help` in a terminal for the full CLI. With arguments, it behaves like the Python CLI and uses the current directory unless you pass `--repo PATH`. The optional Jev triage still uses `TYPESAFE_API_KEY` from your environment. The Windows build is made by [GitHub Actions](https://github.com/Virgo-3/Pioneer/actions/workflows/windows-exe.yml), which also provides a downloadable build artifact on every push.
+Run `Pioneer.exe --help` in a terminal for the full CLI. With arguments, it behaves like the Python CLI and uses the current directory unless you pass `--repo PATH`. Optional Jev decision attention uses `TYPESAFE_API_KEY` from your environment. The Windows build is made by [GitHub Actions](https://github.com/Virgo-3/Pioneer/actions/workflows/windows-exe.yml), which also provides a downloadable build artifact on every push.
 
 ## Python quick start
 
@@ -260,17 +260,21 @@ When Pioneer builds a decision case from conversation, it checks that every numb
 
 If a calculation is missing a material assumption, Pioneer returns to the conversation to ask rather than calculating from a fabricated number.
 
-## Jev triage
+## Optional Jev decision layer
 
-With `TYPESAFE_API_KEY` set, Pioneer can use TypeSafe System One / Jev as an additional routing signal:
+Set `TYPESAFE_API_KEY` to let Pioneer consult Jev when its local routing detects a decision or a substantive follow-up to one. Ordinary chat does not require a Jev call. The routing is deliberately conservative, so it can miss an implicit decision; Pioneer still uses its normal conversational decision guidance in that case.
+
+Jev sees the current message, recent user messages, the active branch's working decision context when the topic continues, a few relevant older user statements, and the previous Jev assessment for that goal. It answers narrow [typed yes/no questions](https://api.typesafe.ai/docs) about whether a choice is in play, whether timing and reversal matter, whether a missing fact could change the choice, and whether prior user statements suggest an assumption to check. Pioneer turns the results into at most two attention cues for OpenAI's single natural reply and saves the assessment with the turn. `/context` shows those decision checks without displaying raw scores.
+
+Jev's values are judgments about the situation described, not outcome probabilities or action recommendations. They never enter the numerical decision case. If Jev is unavailable, Pioneer continues with OpenAI; conversation and local decision analysis also work without a Jev key.
+
+The separate `triage` command remains available when you explicitly want to inspect Jev's four basic scores for an action:
 
 ```bash
 pioneer triage "Launch the product tomorrow"
 ```
 
-Jev scores four questions — decision request, time sensitive, hard to reverse, missing information. These are judgments about how the decision is *described*, not outcome probabilities, and they are never inserted into numerical decision cases.
-
-Conversation and decision analysis both work fine without Jev.
+That manual diagnostic does not replace the conversational decision layer.
 
 ## History and storage
 

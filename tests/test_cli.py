@@ -57,6 +57,30 @@ class ChatTests(unittest.TestCase):
         self.assertIn("On alternate | Launch timing", output)
         self.assertEqual(errors, "")
 
+    def test_context_shows_optional_jev_decision_checks_without_scores(self):
+        self.store.commit("turn", {"user": "Should we launch?", "assistant": "Check the deadline.",
+                                   "context": {"status": "active", "goal": "Launch timing",
+                                               "options": ["launch", "pilot"], "known": [], "uncertain": [],
+                                               "provisional_view": "Pilot first", "next_questions": []},
+                                   "jev": {"goal": "Launch timing", "scores": {"time_sensitive": 0.91},
+                                           "guidance": {"priorities": ["urgency", "reversibility"]}}})
+        output, errors = self.chat(["/context", "/exit"])
+        self.assertIn("Decision checks: timing, what can be undone (Jev guidance)", output)
+        self.assertNotIn("0.91", output)
+        self.assertEqual(errors, "")
+
+    def test_context_hides_prior_jev_checks_after_latest_failure(self):
+        context = {"status": "active", "goal": "Launch timing", "options": ["launch", "pilot"],
+                   "known": [], "uncertain": [], "provisional_view": "Pilot first", "next_questions": []}
+        self.store.commit("turn", {"user": "Should we launch?", "assistant": "Check the deadline.",
+                                   "context": context,
+                                   "jev": {"goal": "Launch timing", "guidance": {"priorities": ["urgency"]}}})
+        self.store.commit("turn", {"user": "The deadline moved.", "assistant": "That changes the timing.",
+                                   "context": context, "jev_error": "Jev unavailable"})
+        output, errors = self.chat(["/context", "/exit"])
+        self.assertNotIn("Decision checks:", output)
+        self.assertEqual(errors, "")
+
     def test_command_errors_are_actionable_and_do_not_leave_chat(self):
         output, errors = self.chat(["/branch", "/switch two words", "/decide",
                                     "/triage", "/unknown", "/help", "/exit"])

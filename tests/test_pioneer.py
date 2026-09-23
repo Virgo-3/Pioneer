@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 from pioneer.decision import DecisionError, analyze
 from pioneer.history import MAX_EVIDENCE, MAX_RECENT_CHARS, MAX_TOTAL_CHARS, recent_messages, retrieve_history
-from pioneer.pipeline import run_turn
-from pioneer.providers import ProviderError, TurnPlan, ask_openai, compose_turn, triage_jev
+from pioneer.pipeline import _last_jev_assessment, run_turn
+from pioneer.providers import ProviderError, TurnPlan, ask_openai, assess_jev, compose_turn, triage_jev
 from pioneer.state import Store, StoreError
 
 
@@ -132,6 +132,48 @@ class ProviderTests(unittest.TestCase):
             triage_jev("Launch tomorrow")
         self.assertEqual(caught.exception.usage["input_tokens"], 50)
 
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
+    @patch("pioneer.providers._post")
+    def test_integrated_jev_receives_branch_decision_state(self, post):
+        post.return_value = {"model": "jev-test", "answers": {
+            name: {"type": "noul", "noul": 0.7}
+            for name in ("decision_request", "time_sensitive", "hard_to_reverse",
+                         "missing_information", "assumption_tension")},
+            "usage": {"input_tokens": 40, "output_tokens": 5}}
+        history = [{"commit": "a" * 64, "quote": "Wait for legal review."}]
+        result = assess_jev("Launch now?", context={"goal": "Launch timing"},
+                            recent_user_messages=["We could pilot first."], history_evidence=history,
+                            previous_assessment={"scores": {"hard_to_reverse": 0.4}})
+        state = post.call_args.args[2]["state"]
+        self.assertEqual(state["working_context"]["goal"], "Launch timing")
+        self.assertEqual(state["older_user_statements"], history)
+        self.assertEqual(state["previous_jev_assessment"]["scores"]["hard_to_reverse"], 0.4)
+        self.assertEqual(result["scores"]["assumption_tension"], 0.7)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
+    @patch("pioneer.providers._post")
+    def test_integrated_jev_asks_about_recent_tension(self, post):
+        post.return_value = {"model": "jev-test", "answers": {
+            name: {"type": "noul", "noul": 0.6}
+            for name in ("decision_request", "time_sensitive", "hard_to_reverse",
+                         "missing_information", "assumption_tension")},
+            "usage": {"input_tokens": 25, "output_tokens": 4}}
+        assess_jev("Should we launch?", recent_user_messages=["Old 1", "Old 2", "Old 3", "Old 4", "Old 5"])
+        request = post.call_args.args[2]
+        self.assertIn("assumption_tension", request["questions"])
+        self.assertEqual(request["state"]["recent_user_messages"], ["Old 2", "Old 3", "Old 4", "Old 5"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
+    @patch("pioneer.providers._post")
+    def test_integrated_jev_omits_tension_question_without_prior_statements(self, post):
+        post.return_value = {"model": "jev-test", "answers": {
+            name: {"type": "noul", "noul": 0.6}
+            for name in ("decision_request", "time_sensitive", "hard_to_reverse", "missing_information")},
+            "usage": {"input_tokens": 25, "output_tokens": 4}}
+        assess_jev("Should we wait?")
+        request = post.call_args.args[2]
+        self.assertNotIn("assumption_tension", request["questions"])
+
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
     def test_structured_turn_contract(self, post):
@@ -157,16 +199,19 @@ class ProviderTests(unittest.TestCase):
         context = {"status": "active", "goal": "Launch", "options": [], "known": [],
                    "uncertain": [], "provisional_view": "Wait", "next_questions": []}
         evidence = [{"commit": "a" * 64, "quote": "Wait for legal review before launch."}]
+        guidance = {"attention": {"reversibility": "focus"}, "priorities": ["reversibility"],
+                    "response_cues": ["Check what can be undone."]}
         post.return_value = {"model": "test", "output": [{"content": [{"type": "output_text", "text": json.dumps({
             "reply": "A launch now may be premature.", "decision_requested": True, "case_json": None,
             "missing": [], "context": context, "explore_alternative": False,
             "history_conflict": {"commit": "a" * 64, "quote": "Wait for legal review",
                                  "challenge": "Has the review finished?"}})}]}]}
         plan = compose_turn([{"role": "user", "content": "Launch now?"}], context=context,
-                            history_evidence=evidence)
+                            history_evidence=evidence, jev_guidance=guidance)
         payload = post.call_args.args[2]
         self.assertEqual(payload["input"][-1]["content"], "Launch now?")
         self.assertIn("retrieved_older_user_statements", payload["input"][-2]["content"])
+        self.assertIn("decision_attention", payload["input"][-2]["content"])
         self.assertNotIn("Wait for legal review", payload["instructions"])
         self.assertEqual(plan.history_conflict["commit"], "a" * 64)
 
@@ -184,6 +229,9 @@ class ProviderTests(unittest.TestCase):
 
 class PipelineTests(unittest.TestCase):
     def setUp(self):
+        self.env_patcher = patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
+        self.env_patcher.start()
+        self.addCleanup(self.env_patcher.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(self.temp.name)
         self.store.init()
@@ -191,10 +239,18 @@ class PipelineTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "", "TYPESAFE_API_KEY": "test"})
+    @patch("pioneer.pipeline.assess_jev")
+    def test_missing_openai_key_does_not_spend_on_jev(self, jev):
+        with self.assertRaisesRegex(ProviderError, "OPENAI_API_KEY"):
+            run_turn(self.store, "Should I launch tomorrow?")
+        jev.assert_not_called()
+        self.assertEqual(self.store.usage(), [])
+
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
     @patch("pioneer.pipeline.compose_turn")
-    @patch("pioneer.pipeline.triage_jev")
-    def test_one_turn_integrates_triage_analysis_and_usage(self, triage, compose):
+    @patch("pioneer.pipeline.assess_jev")
+    def test_one_turn_integrates_jev_attention_analysis_and_usage(self, jev, compose):
         case = {"states": {"good": 0.5, "bad": 0.5}, "actions": {
             "invest": {"outcomes": {"good": 10, "bad": -10}},
             "hold": {"outcomes": {"good": 0, "bad": 0}}},
@@ -202,7 +258,7 @@ class PipelineTests(unittest.TestCase):
                 "positive": {"good": 0.9, "bad": 0.1},
                 "negative": {"good": 0.1, "bad": 0.9}}}}
         text = "Good 50%, bad 50%. Invest pays 10 or -10; hold pays 0. Wait delay costs 1 and information costs 0. A positive signal is 90% likely in good and 10% in bad; a negative signal is 10% in good and 90% in bad."
-        triage.return_value = {"model": "jev-test", "scores": {"decision_request": 0.99,
+        jev.return_value = {"model": "jev-test", "scores": {"decision_request": 0.99,
             "time_sensitive": 0.2, "hard_to_reverse": 0.8, "missing_information": 0.9},
             "input_tokens": 30, "output_tokens": 4}
         compose.return_value = TurnPlan("Here is the comparison.", True, json.dumps(case), [],
@@ -214,8 +270,92 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(self.store.log()), 2)
         self.assertEqual(len(self.store.usage()), 2)
         self.assertEqual({record["commit"] for record in self.store.usage()}, {outcome.commit})
-        self.assertEqual(self.store.read_object(outcome.commit)["payload"]["triage"]["model"], "jev-test")
-        self.assertIsNotNone(compose.call_args.kwargs["triage"])
+        saved_jev = self.store.read_object(outcome.commit)["payload"]["jev"]
+        self.assertEqual(saved_jev["model"], "jev-test")
+        self.assertIn("attention", saved_jev["guidance"])
+        self.assertEqual(compose.call_args.kwargs["jev_guidance"], saved_jev["guidance"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
+    @patch("pioneer.pipeline.compose_turn")
+    @patch("pioneer.pipeline.assess_jev")
+    def test_ordinary_chat_skips_optional_jev_call(self, jev, compose):
+        compose.return_value = TurnPlan("Hello.", False, None, [], "test", 8, 3, "r")
+        outcome = run_turn(self.store, "Hello, Pioneer.")
+        jev.assert_not_called()
+        self.assertEqual(compose.call_args.kwargs["jev_guidance"], None)
+        self.assertNotIn("jev", self.store.read_object(outcome.commit)["payload"])
+        self.assertEqual(len(self.store.usage()), 1)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
+    @patch("pioneer.pipeline.compose_turn")
+    @patch("pioneer.pipeline.assess_jev")
+    def test_jev_attention_carries_forward_with_same_branch_goal(self, jev, compose):
+        context = {"status": "active", "goal": "Launch timing", "options": ["launch", "pilot"],
+                   "known": [], "uncertain": ["deadline"], "provisional_view": "Pilot first",
+                   "next_questions": []}
+        jev.return_value = {"model": "jev-test", "scores": {
+            "decision_request": 0.9, "time_sensitive": 0.8, "hard_to_reverse": 0.7,
+            "missing_information": 0.8}, "input_tokens": 20, "output_tokens": 4}
+        compose.return_value = TurnPlan("A pilot looks safer.", True, None, [], "test", 10, 5,
+                                        "r", context)
+        run_turn(self.store, "Should we launch now or pilot first?")
+        run_turn(self.store, "The deadline moved to Friday.")
+        self.assertEqual(jev.call_count, 2)
+        previous = jev.call_args.kwargs["previous_assessment"]
+        self.assertEqual(previous["scores"]["time_sensitive"], 0.8)
+        self.assertIn("urgency", previous["attention"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
+    @patch("pioneer.pipeline.compose_turn")
+    @patch("pioneer.pipeline.assess_jev")
+    def test_new_decision_does_not_inherit_unrelated_jev_state(self, jev, compose):
+        launch = {"status": "active", "goal": "Launch timing", "options": ["launch", "pilot"],
+                  "known": [], "uncertain": [], "provisional_view": "Pilot first", "next_questions": []}
+        house = {"status": "active", "goal": "House purchase", "options": ["buy", "wait"],
+                 "known": [], "uncertain": [], "provisional_view": "Need a budget", "next_questions": []}
+        jev.return_value = {"model": "jev-test", "scores": {
+            "decision_request": 0.9, "time_sensitive": 0.8, "hard_to_reverse": 0.7,
+            "missing_information": 0.8}, "input_tokens": 20, "output_tokens": 4}
+        compose.side_effect = [
+            TurnPlan("Pilot first.", True, None, [], "test", 10, 5, "r1", launch),
+            TurnPlan("Let's examine your budget.", True, None, [], "test", 10, 5, "r2", house),
+        ]
+        run_turn(self.store, "Should we launch now or pilot first?")
+        outcome = run_turn(self.store, "Should I buy a house?")
+        self.assertIsNone(jev.call_args.kwargs["context"])
+        self.assertIsNone(jev.call_args.kwargs["previous_assessment"])
+        self.assertEqual(jev.call_args.kwargs["recent_user_messages"], [])
+        self.assertEqual(self.store.read_object(outcome.commit)["payload"]["jev"]["goal"], "House purchase")
+
+    def test_jev_decision_state_stays_on_its_branch(self):
+        context = {"status": "active", "goal": "Launch timing"}
+        self.store.commit("turn", {"user": "Should we launch?", "assistant": "Consider a pilot.",
+                                   "context": context})
+        self.store.create_branch("alternate")
+        self.store.commit("turn", {"user": "Main deadline", "assistant": "Noted.",
+                                   "context": context,
+                                   "jev": {"goal": "Launch timing", "scores": {"time_sensitive": 0.9},
+                                           "guidance": {"attention": {"urgency": "focus"}}}})
+        self.store.switch("alternate")
+        self.store.commit("turn", {"user": "Alternate deadline", "assistant": "Noted.",
+                                   "context": context,
+                                   "jev": {"goal": "Launch timing", "scores": {"time_sensitive": 0.1},
+                                           "guidance": {"attention": {"urgency": "background"}}}})
+        self.assertEqual(_last_jev_assessment(self.store, "main", context)["scores"]["time_sensitive"], 0.9)
+        self.assertEqual(_last_jev_assessment(self.store, "alternate", context)["scores"]["time_sensitive"], 0.1)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
+    @patch("pioneer.pipeline.compose_turn")
+    @patch("pioneer.pipeline.assess_jev")
+    def test_jev_failure_keeps_conversation_and_records_usage(self, jev, compose):
+        jev.side_effect = ProviderError("Jev unavailable", usage={"provider": "jev", "model": "jev-test",
+                                                                 "input_tokens": 7, "output_tokens": 1})
+        compose.return_value = TurnPlan("A pilot is worth considering.", True, None, [], "test", 10, 5, "r")
+        outcome = run_turn(self.store, "Should we launch now or pilot?")
+        self.assertEqual(outcome.text, "A pilot is worth considering.")
+        self.assertIsNone(compose.call_args.kwargs["jev_guidance"])
+        self.assertIn("Jev unavailable", self.store.read_object(outcome.commit)["payload"]["jev_error"])
+        self.assertEqual([record["provider"] for record in self.store.usage()], ["jev", "openai"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -457,7 +597,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(self.store.messages("main")), 2)
         self.assertEqual(len(self.store.messages(second.branch)), 4)
 
-    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": "", "OPENAI_API_KEY": ""})
     def test_direct_case_is_analyzed_and_saved_without_api_keys(self):
         case = {"states": {"yes": 1}, "actions": {"do": {"outcomes": {"yes": 2}}}}
         outcome = run_turn(self.store, json.dumps(case))
@@ -467,9 +607,9 @@ class PipelineTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
     @patch("pioneer.pipeline.compose_turn", side_effect=ProviderError("OpenAI unavailable"))
-    @patch("pioneer.pipeline.triage_jev")
-    def test_jev_usage_survives_later_openai_failure(self, triage, _compose):
-        triage.return_value = {"model": "jev-test", "scores": {"decision_request": 0.9},
+    @patch("pioneer.pipeline.assess_jev")
+    def test_jev_usage_survives_later_openai_failure(self, jev, _compose):
+        jev.return_value = {"model": "jev-test", "scores": {"decision_request": 0.9},
                                "input_tokens": 30, "output_tokens": 4}
         with self.assertRaises(ProviderError):
             run_turn(self.store, "Should I launch?")

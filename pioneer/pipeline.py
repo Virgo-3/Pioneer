@@ -1,4 +1,4 @@
-"""One conversational turn: triage, plan, calculate, explain, and commit."""
+"""One conversational turn: attend to the decision, plan, calculate, and commit."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from typing import Any
 
 from .decision import DecisionError, analyze
 from .history import recent_messages, retrieve_history, verified_conflict
-from .providers import ProviderError, compose_turn, triage_jev
+from .jev import make_jev_guidance, select_jev_context, should_consult_jev
+from .providers import ProviderError, assess_jev, compose_turn
 from .state import Store, StoreError
 
 
@@ -150,6 +151,26 @@ def _last_context(store: Store, branch: str) -> dict[str, Any] | None:
     return None
 
 
+def _last_jev_assessment(store: Store, branch: str, context: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Carry decision attention only within the same active branch goal."""
+    if not context or context.get("status") not in {"active", "resolved"}:
+        return None
+    goal = context.get("goal")
+    for _, obj in store.log(branch):
+        if obj["kind"] != "turn":
+            continue
+        payload = obj["payload"]
+        turn_context = payload.get("context")
+        if not isinstance(turn_context, dict) or turn_context.get("goal") != goal:
+            return None
+        jev = payload.get("jev")
+        if isinstance(jev, dict) and jev.get("goal") == goal:
+            guidance = jev.get("guidance")
+            return {"scores": jev.get("scores", {}),
+                    "attention": guidance.get("attention", {}) if isinstance(guidance, dict) else {}}
+    return None
+
+
 def _decision_evidence(store: Store, branch: str, current: str, previous_context: dict[str, Any] | None,
                        next_context: dict[str, Any] | None, recent_turns: int) -> list[dict[str, str]]:
     """Keep numerical and scope checks inside the recent decision conversation."""
@@ -226,26 +247,41 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                                  expected_head=head, expected_branch=starting_branch)
         return TurnOutcome(answer, object_id, "local", [], result, starting_branch)
 
+    # A Jev assessment is billable. Check the conversation provider before
+    # consulting it so an absent OpenAI key cannot leave an unusable result.
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise ProviderError("Set OPENAI_API_KEY to chat with OpenAI.")
+
     history_evidence = retrieve_history(store, starting_branch, text, previous_context, recent_turns)
-    triage: dict[str, Any] | None = None
-    triage_error: str | None = None
+    jev_assessment: dict[str, Any] | None = None
+    jev_guidance: dict[str, Any] | None = None
+    jev_error: str | None = None
     usage: list[dict[str, Any]] = []
-    if os.environ.get("TYPESAFE_API_KEY"):
+    if os.environ.get("TYPESAFE_API_KEY") and should_consult_jev(text, previous_context):
         try:
-            triage = triage_jev(text, context=previous_context)
-            usage.append(_usage("jev", triage))
+            jev_context = select_jev_context(text, previous_context)
+            recent_user_messages = [message["content"] for message in recent if message["role"] == "user"][-4:]
+            if previous_context and previous_context.get("status") in {"active", "resolved"} and jev_context is None:
+                recent_user_messages = []
+            jev_assessment = assess_jev(
+                text, context=jev_context,
+                recent_user_messages=recent_user_messages,
+                history_evidence=history_evidence,
+                previous_assessment=_last_jev_assessment(store, starting_branch, jev_context))
+            jev_guidance = make_jev_guidance(jev_assessment["scores"], jev_context)
+            usage.append(_usage("jev", jev_assessment))
         except ProviderError as exc:
-            triage_error = str(exc)
+            jev_error = str(exc)
             if exc.usage:
                 usage.append(exc.usage)
     try:
-        plan = compose_turn(messages, model=model, triage=triage, context=previous_context,
+        plan = compose_turn(messages, model=model, jev_guidance=jev_guidance, context=previous_context,
                             history_evidence=history_evidence)
     except ProviderError as exc:
         if exc.usage:
             usage.append(exc.usage)
         if usage:
-            store.commit("note", {"title": "Incomplete turn", "text": text, "triage": triage},
+            store.commit("note", {"title": "Incomplete turn", "text": text, "jev": jev_assessment},
                          expected_head=head, expected_branch=starting_branch, usage=usage)
         raise
     usage.append(_usage("openai", plan))
@@ -287,10 +323,12 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         payload["context"] = plan.context
     if explore:
         payload["branched_from"] = starting_branch
-    if triage:
-        payload["triage"] = triage
-    if triage_error:
-        payload["triage_error"] = triage_error
+    if jev_assessment and jev_guidance:
+        payload["jev"] = {"goal": (plan.context or previous_context or {}).get("goal", ""),
+                          "model": jev_assessment["model"], "scores": jev_assessment["scores"],
+                          "guidance": jev_guidance}
+    if jev_error:
+        payload["jev_error"] = jev_error
     if conflict:
         payload["history_conflict"] = conflict
     if case is not None:

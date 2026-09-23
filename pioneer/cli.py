@@ -197,6 +197,23 @@ def _latest_context(store: Store, ref: str | None = None) -> dict[str, Any] | No
     return None
 
 
+def _latest_jev_guidance(store: Store, goal: str) -> dict[str, Any] | None:
+    for _, obj in store.log():
+        if obj["kind"] != "turn":
+            continue
+        payload = obj["payload"]
+        context = payload.get("context")
+        if not isinstance(context, dict) or context.get("goal") != goal:
+            return None
+        if payload.get("jev_error"):
+            return None
+        jev = payload.get("jev")
+        if isinstance(jev, dict) and jev.get("goal") == goal:
+            guidance = jev.get("guidance")
+            return guidance if isinstance(guidance, dict) else None
+    return None
+
+
 def _topic(store: Store, ref: str | None = None) -> str | None:
     for _, obj in store.log(ref):
         payload = obj["payload"]
@@ -235,6 +252,15 @@ def _print_context(store: Store) -> None:
             print(f"  {label}:")
             for value in values:
                 print(f"    - {_brief(value, 160)}")
+    guidance = _latest_jev_guidance(store, str(context.get("goal", "")))
+    if guidance:
+        labels = {"assumption_tension": "earlier assumptions", "urgency": "timing",
+                  "reversibility": "what can be undone", "information_value": "what waiting could reveal"}
+        priorities = guidance.get("priorities")
+        if isinstance(priorities, list) and priorities:
+            checks = [labels[item] for item in priorities if item in labels]
+            if checks:
+                print("Decision checks: " + ", ".join(checks) + " (Jev guidance)")
 
 
 def _required(argument: str, usage: str) -> str:
