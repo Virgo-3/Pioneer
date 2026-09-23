@@ -19,7 +19,7 @@ class DesktopTests(unittest.TestCase):
                 workspace = workspace_path()
                 self.assertEqual(workspace, Path(temp) / "Pioneer" / "workspace")
                 self.assertTrue(Store(workspace).exists)
-                cli.assert_called_with(["--repo", str(workspace), "chat"])
+                cli.assert_called_with(["--repo", str(Store(workspace).root), "chat"])
 
     def test_arguments_retain_regular_cli(self):
         with patch("pioneer.desktop.cli_main", return_value=0) as cli:
