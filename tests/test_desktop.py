@@ -26,15 +26,32 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(main(["--help"]), 0)
             cli.assert_called_once_with(["--help"])
 
-    def test_first_run_key_prompt_saves_only_when_chosen(self):
+    def test_clipboard_entry_saves_only_when_chosen(self):
         with patch.dict(os.environ, {}, clear=True):
             with patch("pioneer.desktop.load_openai_key", return_value=None), \
-                 patch("pioneer.desktop.getpass.getpass", return_value="  fake-key  "), \
-                 patch("builtins.input", return_value="y"), \
+                 patch("pioneer.desktop.read_clipboard_text", return_value="  fake-key  "), \
+                 patch("builtins.input", side_effect=["", "y"]), \
                  patch("pioneer.desktop.save_openai_key") as save:
                 _setup_key()
                 self.assertEqual(os.environ["OPENAI_API_KEY"], "fake-key")
                 save.assert_called_once_with("fake-key")
+
+    def test_visible_mode_accepts_typed_or_pasted_key(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("pioneer.desktop.load_openai_key", return_value=None), \
+                 patch("builtins.input", side_effect=["v", "  fake-key  ", "n"]), \
+                 patch("pioneer.desktop.save_openai_key") as save:
+                _setup_key()
+                self.assertEqual(os.environ["OPENAI_API_KEY"], "fake-key")
+                save.assert_not_called()
+
+    def test_empty_clipboard_can_be_retried_or_skipped(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("pioneer.desktop.load_openai_key", return_value=None), \
+                 patch("pioneer.desktop.read_clipboard_text", return_value=None), \
+                 patch("builtins.input", side_effect=["", "o"]):
+                _setup_key()
+                self.assertNotIn("OPENAI_API_KEY", os.environ)
 
     def test_saved_key_skips_prompt(self):
         with patch.dict(os.environ, {}, clear=True):

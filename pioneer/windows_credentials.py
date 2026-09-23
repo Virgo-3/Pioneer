@@ -19,6 +19,43 @@ def credential_path() -> Path:
     return roaming / "Pioneer" / "openai-key.dpapi"
 
 
+def read_clipboard_text() -> str | None:
+    """Read Unicode text only after the user asks to use their clipboard."""
+    if os.name != "nt":
+        raise OSError("Clipboard key setup is available only on Windows")
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    if not user32.OpenClipboard(None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not user32.IsClipboardFormatAvailable(13):  # CF_UNICODETEXT
+            return None
+        handle = user32.GetClipboardData(13)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return ctypes.wstring_at(pointer)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
 def _crypt(data: bytes, *, protect: bool) -> bytes:
     if os.name != "nt":
         raise OSError("Windows account encryption is available only on Windows")

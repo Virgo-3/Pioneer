@@ -68,7 +68,7 @@ export PIONEER_JEV_MODEL="your-jev-model"
 
 ## Windows executable
 
-Download `Pioneer.exe` from the [latest release](https://github.com/Virgo-3/Pioneer/releases/latest) and double click it. The first launch creates a workspace under `%LOCALAPPDATA%\Pioneer\workspace`, asks for your OpenAI API key with hidden input, and opens the conversation. If you choose to save the key, Windows encrypts it for your user account under `%APPDATA%\Pioneer\openai-key.dpapi`. An existing `OPENAI_API_KEY` takes precedence. You can press Enter instead to use the local decision tools without a key. Python is not needed to run the executable.
+Download `Pioneer.exe` from the [latest release](https://github.com/Virgo-3/Pioneer/releases/latest) and double click it. The first launch creates a workspace under `%LOCALAPPDATA%\Pioneer\workspace`. Copy your OpenAI API key, return to Pioneer, and press Enter: it reads the key from the clipboard without displaying it. You can also choose `H` to type with hidden input, `V` to paste into a visible field, or `O` for offline decision tools. If you choose to save the key, Windows encrypts it for your user account under `%APPDATA%\Pioneer\openai-key.dpapi`. An existing `OPENAI_API_KEY` takes precedence. Python is not needed to run the executable.
 
 Run `Pioneer.exe --help` in a terminal for the full CLI. With arguments, it behaves like the Python CLI and uses the current directory unless you pass `--repo PATH`. The optional Jev triage still uses `TYPESAFE_API_KEY` from your environment. The Windows build is made by [GitHub Actions](https://github.com/Virgo-3/Pioneer/actions/workflows/windows-exe.yml), which also provides a downloadable build artifact on every push.
 
