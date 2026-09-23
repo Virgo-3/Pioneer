@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .decision import DecisionError, analyze
+from .history import RECENT_TURNS, retrieve_history, verified_conflict
 from .providers import ProviderError, compose_turn, triage_jev
 from .state import Store, StoreError
 
@@ -22,7 +23,7 @@ CONCLUSION_WORD = re.compile(
     r"\b(recommend\w*|should|would|better|best|prefer\w*|highest|lowest|payoff|expected|wait|waiting|act|choose)\b",
     re.IGNORECASE,
 )
-MAX_HISTORY_TURNS = 20
+MAX_HISTORY_TURNS = RECENT_TURNS
 
 
 @dataclass(frozen=True)
@@ -223,6 +224,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                                  expected_head=head, expected_branch=starting_branch)
         return TurnOutcome(answer, object_id, "local", [], result, starting_branch)
 
+    history_evidence = retrieve_history(store, starting_branch, text, previous_context)
     triage: dict[str, Any] | None = None
     triage_error: str | None = None
     usage: list[dict[str, Any]] = []
@@ -235,7 +237,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             if exc.usage:
                 usage.append(exc.usage)
     try:
-        plan = compose_turn(messages, model=model, triage=triage, context=previous_context)
+        plan = compose_turn(messages, model=model, triage=triage, context=previous_context,
+                            history_evidence=history_evidence)
     except ProviderError as exc:
         if exc.usage:
             usage.append(exc.usage)
@@ -268,6 +271,10 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
     if not reply:
         questions = (plan.context or {}).get("next_questions", [])
         reply = " ".join(questions) if questions else "What part of this would you like to explore next?"
+    conflict = verified_conflict(plan.history_conflict, history_evidence) if not validation_error else None
+    if conflict:
+        reply += (f"\n\nEarlier you said “{conflict['quote']}” (history {conflict['commit'][:10]}). "
+                  f"{conflict['challenge']}")
     explore = plan.explore_alternative and previous_context and previous_context.get("status") in {"active", "resolved"}
     payload: dict[str, Any] = {"user": text, "assistant": reply, "provider": "openai", "model": plan.model,
                                "decision_requested": decision_requested}
@@ -281,6 +288,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         payload["triage"] = triage
     if triage_error:
         payload["triage_error"] = triage_error
+    if conflict:
+        payload["history_conflict"] = conflict
     if case is not None:
         payload["decision"] = {"case": case, "analysis": result}
     elif decision_requested:

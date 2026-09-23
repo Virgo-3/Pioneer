@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pioneer.decision import DecisionError, analyze
+from pioneer.history import MAX_EVIDENCE, MAX_TOTAL_CHARS, retrieve_history
 from pioneer.pipeline import run_turn
 from pioneer.providers import ProviderError, TurnPlan, ask_openai, compose_turn, triage_jev
 from pioneer.state import Store, StoreError
@@ -141,13 +142,33 @@ class ProviderTests(unittest.TestCase):
                 "context": {"status": "active", "goal": "Decide whether to launch", "options": ["launch"],
                             "known": [], "uncertain": ["demand"], "provisional_view": "Try a pilot",
                             "next_questions": ["What would a pilot cost?"]},
-                "explore_alternative": False})}]}],
+                "explore_alternative": False, "history_conflict": None})}]}],
             "usage": {"input_tokens": 20, "output_tokens": 5}}
         plan = compose_turn([{"role": "user", "content": "Should I launch?"}], model="test-model")
         self.assertTrue(plan.decision_requested)
         self.assertEqual(plan.missing, ["state probabilities"])
         self.assertEqual(plan.context["provisional_view"], "Try a pilot")
         self.assertEqual(post.call_args.args[2]["text"]["format"]["type"], "json_schema")
+        self.assertIn("history_conflict", post.call_args.args[2]["text"]["format"]["schema"]["required"])
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
+    @patch("pioneer.providers._post")
+    def test_older_history_is_input_data_and_conflict_is_structured(self, post):
+        context = {"status": "active", "goal": "Launch", "options": [], "known": [],
+                   "uncertain": [], "provisional_view": "Wait", "next_questions": []}
+        evidence = [{"commit": "a" * 64, "quote": "Wait for legal review before launch."}]
+        post.return_value = {"model": "test", "output": [{"content": [{"type": "output_text", "text": json.dumps({
+            "reply": "A launch now may be premature.", "decision_requested": True, "case_json": None,
+            "missing": [], "context": context, "explore_alternative": False,
+            "history_conflict": {"commit": "a" * 64, "quote": "Wait for legal review",
+                                 "challenge": "Has the review finished?"}})}]}]}
+        plan = compose_turn([{"role": "user", "content": "Launch now?"}], context=context,
+                            history_evidence=evidence)
+        payload = post.call_args.args[2]
+        self.assertEqual(payload["input"][-1]["content"], "Launch now?")
+        self.assertIn("retrieved_older_user_statements", payload["input"][-2]["content"])
+        self.assertNotIn("Wait for legal review", payload["instructions"])
+        self.assertEqual(plan.history_conflict["commit"], "a" * 64)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
@@ -271,6 +292,70 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(sent), 41)
         self.assertEqual(sent[0]["content"], "Old user 5")
         self.assertEqual(compose.call_args.kwargs["context"], context)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_older_statement_can_ground_a_challenge(self, compose):
+        older = "We must finish legal review before the public launch."
+        source = self.store.commit("turn", {"user": older, "assistant": "Understood."})
+        for index in range(20):
+            self.store.commit("turn", {"user": f"Unrelated update {index}", "assistant": "Okay."})
+        conflict = {"commit": source, "quote": "finish legal review before the public launch",
+                    "challenge": "Has legal review finished, or are you changing that condition?"}
+        compose.return_value = TurnPlan("Launching now has a condition to resolve.", True, None, [],
+                                        "test", 10, 5, "r", None, False, conflict)
+        outcome = run_turn(self.store, "Let's do the public launch before legal review is finished.")
+        evidence = compose.call_args.kwargs["history_evidence"]
+        self.assertEqual(evidence[0]["commit"], source)
+        self.assertIn("Earlier you said", outcome.text)
+        self.assertIn(source[:10], outcome.text)
+        self.assertIn("Has legal review finished", outcome.text)
+        self.assertEqual(self.store.read_object(outcome.commit)["payload"]["history_conflict"], conflict)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_fabricated_history_citation_is_not_shown(self, compose):
+        self.store.commit("turn", {"user": "Wait for legal review before launch.", "assistant": "Okay."})
+        for index in range(20):
+            self.store.commit("turn", {"user": f"Update {index}", "assistant": "Okay."})
+        compose.return_value = TurnPlan("Let's examine it.", True, None, [], "test", 10, 5,
+                                        "r", None, False,
+                                        {"commit": "f" * 64, "quote": "Wait for legal review",
+                                         "challenge": "Why did you change your mind?"})
+        outcome = run_turn(self.store, "Launch before legal review?")
+        self.assertEqual(outcome.text, "Let's examine it.")
+        self.assertNotIn("history_conflict", self.store.read_object(outcome.commit)["payload"])
+
+    def test_retrieval_is_bounded_and_stays_on_active_branch(self):
+        self.store.create_branch("alternate")
+        secret = self.store.commit("turn", {"user": "The alternate launch is confidential.", "assistant": "Okay."})
+        self.store.switch("alternate")
+        shared = self.store.commit("turn", {"user": "A launch requires legal review.", "assistant": "Okay."})
+        for index in range(30):
+            self.store.commit("turn", {"user": f"Launch note {index} " + "x" * 800,
+                                       "assistant": "Okay."})
+        evidence = retrieve_history(self.store, "alternate", "Should we launch before legal review?")
+        self.assertIn(shared, {item["commit"] for item in evidence})
+        self.assertNotIn(secret, {item["commit"] for item in evidence})
+        self.assertLessEqual(len(evidence), MAX_EVIDENCE)
+        self.assertLessEqual(sum(len(item["quote"]) for item in evidence), MAX_TOTAL_CHARS)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_retrieved_old_numbers_cannot_authorize_a_calculation(self, compose):
+        self.store.commit("turn", {"user": "For launch, good is 90%, bad 10%; launch pays 10 or -10.",
+                                   "assistant": "Understood."})
+        for index in range(20):
+            self.store.commit("turn", {"user": f"Update {index}", "assistant": "Okay."})
+        case = {"states": {"good": 0.9, "bad": 0.1}, "actions": {
+            "launch": {"outcomes": {"good": 10, "bad": -10}},
+            "hold": {"outcomes": {"good": 0, "bad": 0}}}}
+        compose.return_value = TurnPlan("Here is the result.", True, json.dumps(case), [],
+                                        "test", 10, 5, "r")
+        outcome = run_turn(self.store, "Should we launch now?")
+        self.assertTrue(compose.call_args.kwargs["history_evidence"])
+        self.assertIsNone(outcome.decision)
+        self.assertIn("can't trace every number", outcome.text)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "", "OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")

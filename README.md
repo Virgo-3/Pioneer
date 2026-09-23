@@ -19,6 +19,7 @@ Most AI chat tools give you one linear thread and no way to compare options side
 
 - **Branchable conversations** — fork, explore, and return to the original path later
 - **Persistent working context** — goal, options, known facts, uncertainties, and provisional view, tracked automatically
+- **History-aware challenge** — retrieve relevant older user statements from the active branch and surface a cited tension when a current plan materially conflicts with one
 - **Explicit decision analysis** — compare actions using states, probabilities, payoffs, costs, and reversible outcomes
 - **Value of information** — weigh acting now against waiting for a signal
 - **Reversibility modeling** — account for what's recoverable if an action is later undone
@@ -26,6 +27,8 @@ Most AI chat tools give you one linear thread and no way to compare options side
 - **Content-addressed history** — SHA-256-hashed objects, checkable for corruption or tampering
 - **Usage ledger** — track OpenAI/Jev token usage, with optional cost estimation
 - **Local decision engine** — analyze structured decision cases with no API call at all
+
+For conversation, Pioneer sends the latest 20 turns and its compact working context to OpenAI. It also searches older user turns on the active branch and includes up to five relevant quotations in the same request. If the model identifies a material conflict, Pioneer checks that the quoted text and commit really exist in the retrieved history before showing the challenge. Older quotations do not supply numbers to the decision engine. The search uses word overlap, so it can miss a relevant statement phrased differently; the model can also misjudge whether a change of view is a conflict.
 
 ## Requirements
 
