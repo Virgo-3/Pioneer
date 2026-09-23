@@ -204,6 +204,26 @@ class Store:
             _atomic_write(self.data / "refs" / self.current_branch(), (target + "\n").encode("ascii"))
         return target
 
+    def reset_branch(self, name: str = "main") -> tuple[str | None, str]:
+        """Restart a branch at its root, saving its old tip on a rescue branch."""
+        with self._locked():
+            old_head = self._read_ref(name)
+            root_id, root = self.log(name)[-1]
+            if root["kind"] != "root":
+                raise StoreError(f"Branch {name} has no valid root commit")
+            rescue = None
+            if old_head != root_id:
+                base = f"before-{name[:16]}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{old_head[:8]}"
+                rescue = base
+                suffix = 2
+                while (self.data / "refs" / rescue).exists():
+                    rescue = f"{base}-{suffix}"
+                    suffix += 1
+                _atomic_write(self.data / "refs" / rescue, (old_head + "\n").encode("ascii"))
+                _atomic_write(self.data / "refs" / name, (root_id + "\n").encode("ascii"))
+            _atomic_write(self.data / "HEAD", (name + "\n").encode("ascii"))
+        return rescue, root_id
+
     def commit(self, kind: str, payload: dict[str, Any], *, expected_head: str | None = None,
                expected_branch: str | None = None,
                usage: dict[str, Any] | list[dict[str, Any]] | None = None) -> str:

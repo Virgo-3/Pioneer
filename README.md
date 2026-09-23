@@ -136,6 +136,8 @@ pioneer rewind <commit-id>
 
 Before rewinding, Pioneer creates a rescue branch pointing at the previous head, so the displaced history stays accessible.
 
+To start over on `main`, type `/reset main` in chat or run `pioneer reset main`. Pioneer moves the old `main` history to a named recovery branch and returns `main` to its starting point. API usage records remain in the ledger. Type `/clear` in chat to clear only the display and keep the conversation.
+
 ## Interactive commands
 
 Inside `pioneer chat`, type `/help` to see these:
@@ -147,6 +149,8 @@ Inside `pioneer chat`, type `/help` to see these:
 | `/branches` | List conversations and their topics |
 | `/branch NAME` | Copy the current conversation to a new branch |
 | `/switch NAME` | Continue on another branch |
+| `/clear` | Clear the terminal display without changing history |
+| `/reset [BRANCH]` | Restart `main` or a named branch; preserve old history on a recovery branch |
 | `/log` | Show recent saved turns |
 | `/analysis` | Show the latest complete decision calculation |
 | `/usage` | Show recorded API token usage |
@@ -341,6 +345,7 @@ pioneer [--repo DIR] ask TEXT... [--model MODEL]
 pioneer [--repo DIR] branch [NAME] [--from REF]
 pioneer [--repo DIR] switch NAME
 pioneer [--repo DIR] rewind REF
+pioneer [--repo DIR] reset [BRANCH]
 
 pioneer [--repo DIR] log [--ref REF] [--limit N]
 pioneer [--repo DIR] show [REF]

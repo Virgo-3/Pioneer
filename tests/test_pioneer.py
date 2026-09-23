@@ -42,6 +42,24 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.usage()), 2)
         self.assertEqual(self.store.verify()["usage_entries"], 2)
 
+    def test_reset_main_preserves_history_on_rescue_branch(self):
+        first = self.store.commit("turn", {"user": "old question", "assistant": "old answer"},
+                                  usage={"provider": "openai", "model": "test", "input_tokens": 3,
+                                         "output_tokens": 2})
+        self.store.create_branch("alternate", first)
+        old_main = self.store.commit("turn", {"user": "follow-up", "assistant": "second answer"})
+        self.store.switch("alternate")
+        rescue, root = self.store.reset_branch("main")
+        self.assertEqual(root, self.root)
+        self.assertEqual(self.store.current_branch(), "main")
+        self.assertEqual(self.store.resolve(), self.root)
+        self.assertEqual(self.store.messages(), [])
+        self.assertEqual(self.store.resolve(rescue), old_main)
+        self.assertEqual(self.store.resolve("alternate"), first)
+        self.assertEqual(len(self.store.usage()), 1)
+        self.assertEqual(self.store.verify()["usage_entries"], 1)
+        self.assertEqual(self.store.reset_branch("main"), (None, self.root))
+
     def test_tamper_detection_and_concurrent_head_guard(self):
         with self.assertRaises(StoreError):
             self.store.commit("note", {"text": "stale"}, expected_head="0" * 64)

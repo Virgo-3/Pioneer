@@ -33,6 +33,8 @@ def _parser() -> argparse.ArgumentParser:
     switch.add_argument("name")
     rewind = sub.add_parser("rewind", help="Move this branch to an earlier commit; creates a rescue branch")
     rewind.add_argument("ref")
+    reset = sub.add_parser("reset", help="Restart main or another branch, preserving its previous history")
+    reset.add_argument("branch", nargs="?", default="main")
     log = sub.add_parser("log", help="Show commit history")
     log.add_argument("--ref")
     log.add_argument("--limit", type=int, default=20)
@@ -74,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
             rescue = f"rescue-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{old[:6]}"
             store.create_branch(rescue, old)
             print(f"Moved {store.current_branch()} to {store.rewind(args.ref)[:12]}; prior head saved as {rescue}.")
+        elif args.command == "reset":
+            _reset(store, args.branch)
         elif args.command == "log":
             if args.limit < 1:
                 raise StoreError("--limit must be positive")
@@ -251,6 +255,22 @@ def _file_argument(argument: str) -> str:
     return value
 
 
+def _clear_terminal() -> None:
+    if sys.stdout.isatty():
+        os.system("cls" if os.name == "nt" else "clear")
+
+
+def _reset(store: Store, branch: str, *, clear: bool = False) -> None:
+    rescue, _ = store.reset_branch(branch)
+    if clear:
+        _clear_terminal()
+    print(f"Started a fresh conversation on {branch}.")
+    if rescue:
+        print(f"Previous history is on {rescue}. Use /switch {rescue} to revisit it.")
+    else:
+        print(f"{branch} was already at its starting point.")
+
+
 def _chat(store: Store, model: str | None) -> None:
     store.require()
     print("Pioneer | Talk through a choice, or type /help for commands.")
@@ -278,6 +298,8 @@ def _chat(store: Store, model: str | None) -> None:
                 print("  /branches               List conversations and their topics")
                 print("  /branch NAME            Copy this conversation to a new branch")
                 print("  /switch NAME            Continue on another branch")
+                print("  /clear                  Clear the terminal display")
+                print("  /reset [BRANCH]         Restart main or a named branch; save its old history")
                 print("  /log                    Show recent saved turns")
                 print("  /analysis               Show the latest full calculation")
                 print("  /usage                  Show recorded API token usage")
@@ -304,6 +326,13 @@ def _chat(store: Store, model: str | None) -> None:
             elif command == "/switch":
                 name = _required(argument, "/switch NAME")
                 store.switch(name)
+                _orientation(store)
+            elif command == "/clear" and not argument:
+                _clear_terminal()
+                _orientation(store)
+            elif command == "/reset":
+                name = _required(argument or "main", "/reset [BRANCH]")
+                _reset(store, name, clear=True)
                 _orientation(store)
             elif command == "/log" and not argument:
                 for object_id, obj in store.log()[:12]:

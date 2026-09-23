@@ -78,6 +78,16 @@ class ChatTests(unittest.TestCase):
         self.assertIn('"analysis":', output)
         self.assertEqual(errors, "")
 
+    def test_clear_and_reset_main_restart_chat_without_losing_history(self):
+        old_tip = self.store.commit("turn", {"user": "old goal", "assistant": "old reply"})
+        output, errors = self.chat(["/clear", "/reset main", "/status", "/exit"])
+        self.assertIn("Started a fresh conversation on main", output)
+        self.assertIn("On main | new conversation", output)
+        self.assertEqual(self.store.resolve(), self.store.log()[-1][0])
+        rescue = next(name for name in self.store.branches() if name.startswith("before-main-"))
+        self.assertEqual(self.store.resolve(rescue), old_tip)
+        self.assertEqual(errors, "")
+
 
 if __name__ == "__main__":
     unittest.main()
