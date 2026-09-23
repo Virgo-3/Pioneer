@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .calibration import add_forecast, calibration_report, open_forecasts, resolve_forecast
 from .decision import DecisionError, analyze
 from .pipeline import run_turn
 from .providers import ProviderError, triage_jev
@@ -48,6 +50,18 @@ def _parser() -> argparse.ArgumentParser:
     decide.add_argument("--no-save", action="store_true", help="Analyze without creating a commit")
     triage = sub.add_parser("triage", help="Ask Jev for four narrow uncertainty judgments")
     triage.add_argument("text", nargs="+")
+    forecast = sub.add_parser("forecast", help="Record a yes/no prediction with a resolution condition")
+    forecast.add_argument("probability", help="Probability such as 0.7 or 70%%")
+    forecast.add_argument("event", nargs="+", help="Specific event to check later")
+    forecast.add_argument("--by", dest="deadline", required=True, help="Resolution date or condition")
+    forecast.add_argument("--topic", default="", help="Optional topic for grouped calibration")
+    sub.add_parser("forecasts", help="List open predictions on this branch")
+    resolution = sub.add_parser("resolve", help="Report whether a predicted event happened")
+    resolution.add_argument("id", help="Forecast ID or unique prefix")
+    resolution.add_argument("outcome", choices=("yes", "no"))
+    calibration = sub.add_parser("calibration", help="Compare predictions with reported outcomes on this branch")
+    calibration.add_argument("--topic", help="Show only one forecast topic")
+    calibration.add_argument("--source", choices=("pioneer", "user", "all"), default="pioneer")
     sub.add_parser("verify", help="Check stored object hashes, refs, and ledger links")
     return parser
 
@@ -96,6 +110,14 @@ def main(argv: list[str] | None = None) -> int:
             _decide(store, args.file, save=not args.no_save)
         elif args.command == "triage":
             _triage(store, " ".join(args.text))
+        elif args.command == "forecast":
+            _forecast(store, args.probability, " ".join(args.event), args.deadline, args.topic)
+        elif args.command == "forecasts":
+            _print_forecasts(store)
+        elif args.command == "resolve":
+            _resolve_forecast(store, args.id, args.outcome)
+        elif args.command == "calibration":
+            _print_calibration(store, source=args.source, topic=args.topic)
         elif args.command == "verify":
             counts = store.verify()
             print(f"Verified {counts['objects']} objects, {counts['branches']} branches, {counts['usage_entries']} usage entries.")
@@ -126,6 +148,111 @@ def _triage(store: Store, text: str) -> None:
     for label, probability in result["scores"].items():
         print(f"  {label.replace('_', ' '):<22} {probability:.1%}")
     print("These are judgments about the description, not measured outcome probabilities. Use 'decide' for an explicit decision case.")
+
+
+def _parse_probability(value: str) -> float:
+    raw = value.strip()
+    percentage = raw.endswith("%")
+    try:
+        probability = float(raw[:-1].strip() if percentage else raw)
+    except ValueError as exc:
+        raise StoreError("Probability must be between 0 and 1, or a percentage such as 70%.") from exc
+    if not math.isfinite(probability):
+        raise StoreError("Probability must be a finite number.")
+    if percentage:
+        probability /= 100
+    elif probability > 1:
+        raise StoreError("Use 0.7 or 70%, not 70; bare numbers above 1 are ambiguous.")
+    if not 0 <= probability <= 1:
+        raise StoreError("Probability must be between 0 and 1, or a percentage from 0% to 100%.")
+    return probability
+
+
+def _percentage(value: float) -> str:
+    return f"{value * 100:g}%"
+
+
+def _forecast(store: Store, probability: str, event: str, deadline: str, topic: str = "") -> None:
+    chance = _parse_probability(probability)
+    forecast_id = add_forecast(store, event.strip(), chance, deadline.strip(),
+                               topic=topic.strip(), source="user")
+    print(f"Saved forecast {forecast_id[:12]} on {store.current_branch()}: "
+          f"{_percentage(chance)} that {event.strip()}.")
+    print(f"Resolution condition: {deadline.strip()}")
+    print(f"ID: {forecast_id}")
+
+
+def _print_forecasts(store: Store) -> None:
+    items = open_forecasts(store)
+    if not items:
+        print(f"No open forecasts on {store.current_branch()}.")
+        return
+    print(f"Open forecasts on {store.current_branch()} ({len(items)}):")
+    for item in items:
+        probability = item["probability"]
+        print(f"  {item['id'][:12]}  {_percentage(probability)}  "
+              f"[{item['source']}] {_brief(item['event'], 110)}")
+        print(f"    Resolution condition: {_brief(item['deadline'], 110)}")
+        if item.get("topic"):
+            print(f"    Topic: {_brief(item['topic'], 110)}")
+        print(f"    ID: {item['id']}")
+
+
+def _resolve_forecast(store: Store, ref: str, outcome: str) -> None:
+    resolution_id = resolve_forecast(store, ref, outcome == "yes")
+    forecast_id = store.read_object(resolution_id)["payload"]["resolution"]["forecast_id"]
+    print(f"Recorded your outcome for forecast {forecast_id[:12]}: "
+          f"{'happened' if outcome == 'yes' else 'did not happen'}.")
+    print(f"Forecast ID: {forecast_id}")
+    print(f"Resolution entry: {resolution_id}")
+
+
+def _print_calibration(store: Store, *, source: str = "pioneer", topic: str | None = None) -> None:
+    report = calibration_report(store, source=source, topic=topic)
+    count = report["count"]
+    label = "Pioneer" if source == "pioneer" else "your" if source == "user" else "all"
+    if count == 0:
+        subject = ("Pioneer forecasts" if source == "pioneer" else
+                   "forecasts you entered" if source == "user" else "forecasts")
+        print(f"No resolved {subject}" + (f" for {topic}" if topic else "") +
+              f" on {store.current_branch()} yet.")
+        if source == "pioneer":
+            print("For your forecasts, use 'calibration --source user' or '/calibration user'.")
+        return
+    print(f"Calibration on {store.current_branch()} | {label} forecasts" +
+          (f" | topic: {topic}" if topic else ""))
+    print("  Outcomes were reported by a user; Pioneer has not verified them.")
+    print(f"  Resolved: {count}")
+    print(f"  Average forecast: {report['mean_predicted']:.1%}")
+    print(f"  Reported event rate: {report['observed_rate']:.1%}")
+    print(f"  Brier score: {report['brier_score']:.3f} (lower is better against reported outcomes)")
+    buckets = report.get("buckets", [])
+    if buckets:
+        print("  Reported outcomes by confidence range:")
+        for bucket in buckets:
+            if not isinstance(bucket, dict) or not bucket.get("count"):
+                continue
+            label = (bucket.get("label") or bucket.get("range") or
+                     f"{bucket['lower']:.0%}-{bucket['upper']:.0%}")
+            expected = bucket.get("mean_predicted")
+            observed = bucket.get("observed_rate")
+            if isinstance(expected, (float, int)) and isinstance(observed, (float, int)):
+                print(f"    {label}: {bucket['count']} forecast(s), "
+                      f"predicted {expected:.1%}, reported {observed:.1%}")
+
+
+def _chat_forecast(store: Store, argument: str) -> None:
+    parts = [part.strip() for part in argument.split("|")]
+    if len(parts) not in {3, 4} or not all(parts[:3]):
+        raise StoreError("Use /forecast PROBABILITY | EVENT | DEADLINE [| TOPIC].")
+    _forecast(store, parts[0], parts[1], parts[2], parts[3] if len(parts) == 4 else "")
+
+
+def _chat_resolve(store: Store, argument: str) -> None:
+    parts = argument.split()
+    if len(parts) != 2 or parts[1].lower() not in {"yes", "no"}:
+        raise StoreError("Use /resolve ID yes|no. Find IDs with /forecasts.")
+    _resolve_forecast(store, parts[0], parts[1].lower())
 
 
 def _decide(store: Store, file: str, *, save: bool = True) -> None:
@@ -329,6 +456,10 @@ def _chat(store: Store, model: str | None) -> None:
                 print("  /log                    Show recent saved turns")
                 print("  /analysis               Show the latest full calculation")
                 print("  /usage                  Show recorded API token usage")
+                print("  /forecast P | EVENT | WHEN [| TOPIC]  Save a prediction (P: 0.7 or 70%)")
+                print("  /forecasts              List open predictions and their IDs")
+                print("  /resolve ID yes|no      Report whether a predicted event happened")
+                print("  /calibration [SOURCE]   Compare forecasts with reported outcomes")
                 print("  /decide FILE            Calculate a decision from JSON")
                 print("  /triage ACTION          Ask Jev to assess an action")
                 print("  /model MODEL            Select a model for this session")
@@ -377,6 +508,17 @@ def _chat(store: Store, model: str | None) -> None:
                 _print_context(store)
             elif command == "/usage" and not argument:
                 _usage(store, None)
+            elif command == "/forecast":
+                _chat_forecast(store, argument)
+            elif command == "/forecasts" and not argument:
+                _print_forecasts(store)
+            elif command == "/resolve":
+                _chat_resolve(store, argument)
+            elif command == "/calibration":
+                source = argument.strip().lower() or "pioneer"
+                if source not in {"pioneer", "user", "all"}:
+                    raise StoreError("Use /calibration [pioneer|user|all].")
+                _print_calibration(store, source=source)
             elif command == "/analysis" and not argument:
                 for _, obj in store.log():
                     payload = obj["payload"]

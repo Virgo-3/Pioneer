@@ -4,9 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pioneer.calibration import add_forecast, calibration_report, forecast_records, resolve_forecast
 from pioneer.decision import DecisionError, analyze
 from pioneer.history import MAX_EVIDENCE, MAX_RECENT_CHARS, MAX_TOTAL_CHARS, recent_messages, retrieve_history
-from pioneer.pipeline import _last_jev_assessment, run_turn
+from pioneer.pipeline import (_last_jev_assessment, _reported_outcome,
+                              _visible_forecast_probability, run_turn)
 from pioneer.providers import ProviderError, TurnPlan, ask_openai, assess_jev, compose_turn, triage_jev
 from pioneer.state import Store, StoreError
 
@@ -195,6 +197,30 @@ class ProviderTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
+    def test_structured_forecast_fields_and_calibration_context(self, post):
+        context = {"status": "active", "goal": "Launch timing", "options": [], "known": [],
+                   "uncertain": [], "provisional_view": "Wait", "next_questions": []}
+        forecast = {"event": "Launch by Friday", "probability": 0.7, "deadline": "Friday"}
+        response = {"reply": "I estimate a 70% chance of launching by Friday.",
+                    "decision_requested": False, "case_json": None, "missing": [],
+                    "context": context, "explore_alternative": False, "history_conflict": None,
+                    "forecast": forecast, "resolution": None}
+        post.return_value = {"model": "test", "output": [{"content": [
+            {"type": "output_text", "text": json.dumps(response)}]}],
+            "usage": {"input_tokens": 15, "output_tokens": 7}}
+        plan = compose_turn([{"role": "user", "content": "What are the chances?"}],
+                            calibration={"count": 5, "observed_rate": 0.4})
+        self.assertEqual(plan.forecast, forecast)
+        self.assertIsNone(plan.resolution)
+        self.assertIn("forecast", post.call_args.args[2]["text"]["format"]["schema"]["required"])
+        self.assertIn("calibration_history", post.call_args.args[2]["input"][-2]["content"])
+        response["forecast"]["probability"] = 1.5
+        post.return_value["output"][0]["content"][0]["text"] = json.dumps(response)
+        with self.assertRaises(ProviderError):
+            compose_turn([{"role": "user", "content": "What are the chances?"}])
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
+    @patch("pioneer.providers._post")
     def test_older_history_is_input_data_and_conflict_is_structured(self, post):
         context = {"status": "active", "goal": "Launch", "options": [], "known": [],
                    "uncertain": [], "provisional_view": "Wait", "next_questions": []}
@@ -285,6 +311,162 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(compose.call_args.kwargs["jev_guidance"], None)
         self.assertNotIn("jev", self.store.read_object(outcome.commit)["payload"])
         self.assertEqual(len(self.store.usage()), 1)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_conversation_records_and_scores_its_own_forecast(self, compose):
+        context = {"status": "active", "goal": "Launch timing", "options": ["launch", "wait"],
+                   "known": [], "uncertain": [], "provisional_view": "Wait", "next_questions": []}
+        compose.return_value = TurnPlan(
+            "I estimate a 70% chance we launch by Friday.", False, None, [], "test-model", 10, 5,
+            "r1", context, forecast={"event": "We launch by Friday", "probability": 0.7,
+                                     "deadline": "Friday"})
+        first = run_turn(self.store, "What are the chances we launch by Friday?")
+        saved = self.store.read_object(first.commit)["payload"]["forecast"]
+        self.assertEqual((saved["probability"], saved["source"], saved["topic"]),
+                         (0.7, "pioneer", "Launch timing"))
+        self.assertIn("track that forecast", first.text)
+
+        compose.return_value = TurnPlan("That remains a plan.", False, None, [], "test-model", 10, 5,
+                                        "r2", context, resolution={"forecast_id": first.commit,
+                                                                    "outcome": True})
+        planned = run_turn(self.store, "We plan to launch Friday.")
+        self.assertNotIn("resolution", self.store.read_object(planned.commit)["payload"])
+        self.assertIsNone(forecast_records(self.store)[0]["resolution"])
+
+        compose.return_value = TurnPlan("That was after the deadline.", False, None, [],
+                                        "test-model", 10, 5, "r-late", context,
+                                        resolution={"forecast_id": first.commit, "outcome": True})
+        late = run_turn(self.store, "We launched Saturday.")
+        self.assertNotIn("resolution", self.store.read_object(late.commit)["payload"])
+        self.assertIsNone(forecast_records(self.store)[0]["resolution"])
+
+        compose.return_value = TurnPlan("Thanks for reporting the result.", False, None, [],
+                                        "test-model", 10, 5, "r3", context,
+                                        resolution={"forecast_id": first.commit, "outcome": True})
+        resolved = run_turn(self.store, "We launched Friday.")
+        self.assertEqual(self.store.read_object(resolved.commit)["payload"]["resolution"]["forecast_id"],
+                         first.commit)
+        report = calibration_report(self.store)
+        self.assertEqual(report["count"], 1)
+        self.assertAlmostEqual(report["brier_score"], 0.09)
+
+        compose.return_value = TurnPlan("Thanks for the correction.", False, None, [],
+                                        "test-model", 10, 5, "r-correct", context,
+                                        resolution={"forecast_id": first.commit, "outcome": False})
+        corrected = run_turn(self.store, "Actually, we did not launch by Friday.")
+        self.assertEqual(self.store.read_object(corrected.commit)["payload"]["resolution"]["outcome"], False)
+        self.assertEqual(compose.call_args.kwargs["recent_resolutions"][0]["id"], first.commit)
+        self.assertAlmostEqual(calibration_report(self.store)["brier_score"], 0.49)
+
+        compose.return_value = TurnPlan("One result is too little to calibrate me.", False, None, [],
+                                        "test-model", 10, 5, "r4", context)
+        run_turn(self.store, "How calibrated are you?")
+        self.assertEqual(compose.call_args.kwargs["calibration"]["count"], 1)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_forecast_requires_matching_visible_event_and_deadline(self, compose):
+        forecast = {"event": "We launch by Friday", "probability": 0.7, "deadline": "Friday"}
+        for reply in ("Rain is 70%, but launch by Friday is 30%.",
+                      "I estimate a 70% chance of rain."):
+            compose.return_value = TurnPlan(reply, False, None, [], "test-model", 10, 5,
+                                            "r", forecast=forecast)
+            result = run_turn(self.store, "Give me odds we launch by Friday.")
+            self.assertNotIn("forecast", self.store.read_object(result.commit)["payload"])
+        self.assertEqual(forecast_records(self.store), [])
+
+        compose.return_value = TurnPlan("I estimate a 70% chance we launch by Friday.",
+                                        False, None, [], "test-model", 10, 5,
+                                        "r", forecast=forecast)
+        result = run_turn(self.store, "How confident are you that we launch by Friday?")
+        self.assertIn("forecast", self.store.read_object(result.commit)["payload"])
+
+        beta = {"event": "Project Beta launch by Friday", "probability": 0.7,
+                "deadline": "Friday"}
+        compose.return_value = TurnPlan(
+            "Project Alpha launch by Friday: 70%, Project Beta launch by Friday: 30%.",
+            False, None, [], "test-model", 10, 5, "r", forecast=beta)
+        result = run_turn(self.store, "What are the chances Project Beta launches by Friday?")
+        self.assertNotIn("forecast", self.store.read_object(result.commit)["payload"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_late_report_does_not_become_a_forecast_success(self, compose):
+        forecast_id = add_forecast(self.store, "Project Beta launch by Friday", 0.7,
+                                   "Friday", source="pioneer")
+        report = "Project Beta launched Saturday, not Friday."
+        compose.return_value = TurnPlan("That missed Friday.", False, None, [], "test", 10, 5,
+                                        "r", resolution={"forecast_id": forecast_id,
+                                                         "outcome": True})
+        wrong = run_turn(self.store, report)
+        self.assertNotIn("resolution", self.store.read_object(wrong.commit)["payload"])
+        compose.return_value = TurnPlan("I'll record that as a miss.", False, None, [],
+                                        "test", 10, 5, "r", resolution={"forecast_id": forecast_id,
+                                                                         "outcome": False})
+        corrected = run_turn(self.store, report)
+        self.assertFalse(self.store.read_object(corrected.commit)["payload"]["resolution"]["outcome"])
+
+    def test_forecast_identity_allows_ordinary_word_order_without_crossing_events(self):
+        forecast = {"id": "a" * 64, "event": "Project Beta launch by Friday",
+                    "probability": 0.7, "deadline": "Friday"}
+        self.assertTrue(_visible_forecast_probability(
+            "I estimate a 70% chance we launch Project Beta by Friday.", forecast))
+        self.assertTrue(_visible_forecast_probability(
+            "I estimate a 70% chance Project Beta successfully launches by Friday.", forecast))
+        self.assertFalse(_visible_forecast_probability(
+            "Project Alpha launch by Friday: 70%, Project Beta launch by Friday: 30%.", forecast))
+        self.assertIs(_reported_outcome("We launched Project Beta by Friday.", forecast), True)
+        self.assertIs(_reported_outcome("Project Beta successfully launched by Friday.", forecast), True)
+        self.assertIsNone(_reported_outcome(
+            "Project Alpha launched Friday; Project Beta launched Saturday.", forecast))
+        self.assertIs(_reported_outcome(
+            "Project Alpha launched Friday; Project Beta did not launch Friday.", forecast), False)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_similar_forecast_history_reaches_future_decision(self, compose):
+        for index in range(5):
+            forecast_id = add_forecast(self.store, f"Launch trial {index}", 0.6,
+                                       "Friday", topic="Launch timing", source="pioneer", model="test")
+            resolve_forecast(self.store, forecast_id, index < 3)
+        context = {"status": "active", "goal": "Launch timing", "options": ["launch", "wait"],
+                   "known": [], "uncertain": [], "provisional_view": "Wait", "next_questions": []}
+        self.store.commit("turn", {"user": "Should we launch?", "assistant": "Consider waiting.",
+                                   "context": context})
+        compose.return_value = TurnPlan("Let's examine the timing.", True, None, [], "test", 10, 5,
+                                        "r", context)
+        run_turn(self.store, "Should we launch next week?")
+        evidence = compose.call_args.kwargs["calibration"]
+        self.assertEqual(evidence["count"], 5)
+        self.assertEqual(evidence["observed_rate"], 0.6)
+        self.assertIn("Limited evidence", evidence["caveat"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_forecast_question_receives_only_matching_topic_history(self, compose):
+        for index in range(5):
+            forecast_id = add_forecast(self.store, f"Launch trial {index}", 0.6,
+                                       "Friday", topic="Launch timing", source="pioneer")
+            resolve_forecast(self.store, forecast_id, index < 3)
+        compose.return_value = TurnPlan("I need the current evidence to estimate that.",
+                                        False, None, [], "test", 10, 5, "r")
+        run_turn(self.store, "What are the chances we launch by Friday?")
+        self.assertEqual(compose.call_args.kwargs["calibration"]["count"], 5)
+        run_turn(self.store, "What are the chances of rain by Friday?")
+        self.assertIsNone(compose.call_args.kwargs["calibration"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_calibration_history_does_not_cross_project_subjects(self, compose):
+        for index in range(5):
+            forecast_id = add_forecast(self.store, f"Project Alpha launch trial {index}", 0.6,
+                                       "Friday", topic="Project Alpha launch", source="pioneer")
+            resolve_forecast(self.store, forecast_id, index < 3)
+        compose.return_value = TurnPlan("Let's estimate Beta separately.", False, None, [],
+                                        "test", 10, 5, "r")
+        run_turn(self.store, "What are the chances Project Beta launches by Friday?")
+        self.assertIsNone(compose.call_args.kwargs["calibration"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
     @patch("pioneer.pipeline.compose_turn")

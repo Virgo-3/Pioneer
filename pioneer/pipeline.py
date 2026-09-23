@@ -10,6 +10,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from .calibration import (CalibrationError, calibration_context, calibration_report,
+                          forecast_records, validate_forecast)
 from .decision import DecisionError, analyze
 from .history import recent_messages, retrieve_history, verified_conflict
 from .jev import make_jev_guidance, select_jev_context, should_consult_jev
@@ -24,6 +26,32 @@ CONCLUSION_WORD = re.compile(
     r"\b(recommend\w*|should|would|better|best|prefer\w*|highest|lowest|payoff|expected|wait|waiting|act|choose)\b",
     re.IGNORECASE,
 )
+FORECAST_REQUEST = re.compile(
+    r"\b(?:how likely|how confident|what(?:'s| is| are) (?:the )?(?:chances?|odds|probability)|"
+    r"(?:give|make) (?:me )?(?:your |a )?(?:forecast|probability estimate|odds)|"
+    r"(?:give me|what is|what's) (?:a |your |the )?(?:percentage|percent chance)|"
+    r"(?:estimate|predict) (?:the )?(?:chances?|odds|probability)|"
+    r"(?:can|could|would) you (?:predict|forecast|estimate)|"
+    r"your (?:forecast|probability|odds|estimate))\b", re.IGNORECASE)
+CALIBRATION_QUERY = re.compile(r"\b(?:calibrat\w*|forecast accuracy|how accurate|brier)\b", re.IGNORECASE)
+VISIBLE_PERCENT = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?:%|percent\b)", re.IGNORECASE)
+CLAUSE_BREAK = re.compile(r"(?<!\d)[.!?;,\n](?!\d)|\bbut\b", re.IGNORECASE)
+CORRECTION_CUE = re.compile(
+    r"(?:^\s*no\b|\b(?:actually|correction|correct that|wrong|i meant|instead|rather than)\b)",
+    re.IGNORECASE)
+NEGATIVE_OUTCOME = re.compile(
+    r"\b(?:failed|never happened|did not happen|didn't happen|"
+    r"(?:did not|didn't) (?:launch|ship|arrive|deliver|pass|win|release|finish|start|open|close|succeed)|"
+    r"(?:was not|wasn't|were not|weren't) (?:launched|shipped|delivered|released|finished|started|opened|closed)|"
+    r"was cancelled|was canceled|it didn't|missed|did not|didn't|never)\b", re.IGNORECASE)
+POSITIVE_OUTCOME = re.compile(
+    r"\b(?:happened|occurred|succeeded|completed|launched|shipped|arrived|delivered|"
+    r"passed|won|released|finished|started|opened|closed|came true|it did)\b", re.IGNORECASE)
+EVENT_STOPWORDS = {"about", "after", "before", "could", "deadline", "event", "from", "happen",
+                   "happens", "have", "into", "might", "occur", "should", "their", "there",
+                   "these", "those", "would", "with", "will", "when", "that", "this", "they",
+                   "then", "than", "were", "your", "chance", "likely", "probability", "forecast",
+                   "timing", "decision", "question", "choose", "whether", "options"}
 
 
 @dataclass(frozen=True)
@@ -228,6 +256,98 @@ def _analysis_framing(reply: str) -> str:
     return framing
 
 
+def _deadline_mentioned(text: str, deadline: str) -> bool:
+    normalized = " ".join(text.casefold().split())
+    target = " ".join(deadline.casefold().split())
+    return target in normalized or (target.startswith("by ") and target[3:] in normalized)
+
+
+def _event_mentioned(text: str, event: str, deadline: str) -> bool:
+    """Require all event words in one clause, allowing ordinary word order changes."""
+    event_terms = _salient_terms(re.sub(re.escape(deadline), " ", event, flags=re.IGNORECASE)
+                                 if deadline else event)
+    return bool(event_terms) and any(event_terms <= _salient_terms(clause)
+                                     for clause in re.split(r"[.!?;,\n]", text))
+
+
+def _salient_words(text: str) -> list[str]:
+    return [word[:4] for word in re.findall(r"[a-z]{4,}", text.casefold())
+            if word not in EVENT_STOPWORDS]
+
+
+def _salient_terms(text: str) -> set[str]:
+    return set(_salient_words(text))
+
+
+def _matching_calibration_topic(store: Store, records: list[dict], text: str) -> dict | None:
+    """Select feedback only when one recorded topic clearly matches this question."""
+    question_terms = _salient_terms(text)
+    topic_scores = {topic: len(_salient_terms(topic))
+                    for topic in {item["forecast"]["topic"] for item in records
+                                  if item["forecast"]["source"] == "pioneer"
+                                  and item["resolution"] is not None and item["forecast"]["topic"]}
+                    if _salient_terms(topic) and _salient_terms(topic) <= question_terms}
+    best = max(topic_scores.values(), default=0)
+    if best == 0:
+        return None
+    matches = [topic for topic, score in topic_scores.items() if score == best]
+    if len(matches) != 1:
+        return None
+    return calibration_context(store, matches[0])
+
+
+def _visible_forecast_probability(reply: str, forecast: dict[str, Any]) -> bool:
+    """Tie the displayed percentage to this event and deadline, not another estimate."""
+    percentages = list(VISIBLE_PERCENT.finditer(reply))
+    if len(percentages) != 1:
+        return False
+    breaks = list(CLAUSE_BREAK.finditer(reply))
+    for match in percentages:
+        if not math.isclose(float(match.group(1)) / 100, forecast["probability"], abs_tol=0.0001):
+            continue
+        left = max((item.end() for item in breaks if item.end() <= match.start()), default=0)
+        right = min((item.start() for item in breaks if item.start() >= match.end()), default=len(reply))
+        clause = reply[left:right]
+        if (_deadline_mentioned(clause, forecast["deadline"])
+                and _event_mentioned(clause, forecast["event"], forecast["deadline"])):
+            return True
+    return False
+
+
+def _reported_outcome(text: str, forecast: dict[str, Any]) -> bool | None:
+    """Score a report only when it identifies the saved event and its deadline."""
+    if text.rstrip().endswith("?") and not re.search(r"[.!]\s*[^?]*\?\s*$", text):
+        return None
+    forecast_id = forecast["id"]
+    for match in re.finditer(r"\b[0-9a-f]{8,64}\b", text.casefold()):
+        if forecast_id.startswith(match.group()):
+            answer = re.match(r"\s*(?:was|is|:)?\s*(yes|no|true|false)\b",
+                              text[match.end():], re.IGNORECASE)
+            if answer:
+                return answer.group(1).casefold() in {"yes", "true"}
+    if (not _deadline_mentioned(text, forecast["deadline"])
+            or not _event_mentioned(text, forecast["event"], forecast["deadline"])):
+        return None
+    late = bool(re.search(r"\b(?:after|not(?:\s+by|\s+on)?|instead\s+of|rather\s+than)\s+"
+                          + re.escape(forecast["deadline"]) + r"\b", text, re.IGNORECASE))
+    if late:
+        return False
+    matching_clauses = [clause for clause in re.split(r"[.!?;,\n]", text)
+                        if _deadline_mentioned(clause, forecast["deadline"])
+                        and _event_mentioned(clause, forecast["event"], forecast["deadline"])]
+    if len(matching_clauses) != 1:
+        return None
+    clause = matching_clauses[0]
+    negative = bool(NEGATIVE_OUTCOME.search(clause))
+    remaining = NEGATIVE_OUTCOME.sub(" ", clause)
+    positive = bool(POSITIVE_OUTCOME.search(remaining))
+    if negative and positive:
+        return None
+    if negative:
+        return False
+    return True if positive else None
+
+
 def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcome:
     store.require()
     if not text.strip():
@@ -253,6 +373,39 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         raise ProviderError("Set OPENAI_API_KEY to chat with OpenAI.")
 
     history_evidence = retrieve_history(store, starting_branch, text, previous_context, recent_turns)
+    records = forecast_records(store, starting_branch)
+    available_forecasts = [{"id": item["id"], **item["forecast"]}
+                           for item in reversed(records) if item["resolution"] is None]
+    resolved_by_id = {item["id"]: item for item in records if item["resolution"] is not None}
+    resolved_forecasts: list[dict[str, Any]] = []
+    seen_resolutions: set[str] = set()
+    for _, obj in store.log(starting_branch):
+        resolution = obj.get("payload", {}).get("resolution")
+        forecast_id = resolution.get("forecast_id") if isinstance(resolution, dict) else None
+        if forecast_id in resolved_by_id and forecast_id not in seen_resolutions:
+            item = resolved_by_id[forecast_id]
+            resolved_forecasts.append({"id": item["id"], **item["forecast"],
+                                       "reported_outcome": item["resolution"]["outcome"]})
+            seen_resolutions.add(forecast_id)
+    mentioned_ids = re.findall(r"\b[0-9a-f]{8,64}\b", text.lower())
+    mentioned = [item for item in available_forecasts
+                 if any(item["id"].startswith(prefix) for prefix in mentioned_ids)]
+    open_context = (mentioned + [item for item in available_forecasts if item not in mentioned])[:5]
+    resolved_context: list[dict[str, Any]] = []
+    if CORRECTION_CUE.search(text):
+        mentioned_resolved = [item for item in resolved_forecasts
+                              if any(item["id"].startswith(prefix) for prefix in mentioned_ids)]
+        resolved_context = (mentioned_resolved + [item for item in resolved_forecasts
+                                                   if item not in mentioned_resolved])[:3]
+    calibration_evidence: dict[str, Any] | None = None
+    if CALIBRATION_QUERY.search(text):
+        calibration_evidence = calibration_report(store, starting_branch, source="pioneer")
+    elif FORECAST_REQUEST.search(text):
+        calibration_evidence = _matching_calibration_topic(store, records, text)
+    elif previous_context and select_jev_context(text, previous_context) is not None:
+        topic = str(previous_context.get("goal", "")).strip()[:120]
+        if topic:
+            calibration_evidence = calibration_context(store, topic)
     jev_assessment: dict[str, Any] | None = None
     jev_guidance: dict[str, Any] | None = None
     jev_error: str | None = None
@@ -276,7 +429,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                 usage.append(exc.usage)
     try:
         plan = compose_turn(messages, model=model, jev_guidance=jev_guidance, context=previous_context,
-                            history_evidence=history_evidence)
+                            history_evidence=history_evidence, open_forecasts=open_context,
+                            recent_resolutions=resolved_context, calibration=calibration_evidence)
     except ProviderError as exc:
         if exc.usage:
             usage.append(exc.usage)
@@ -314,6 +468,36 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
     if conflict:
         reply += (f"\n\nEarlier you said “{conflict['quote']}” (history {conflict['commit'][:10]}). "
                   f"{conflict['challenge']}")
+    stored_forecast: dict[str, Any] | None = None
+    if plan.forecast and FORECAST_REQUEST.search(text) and case is None and not validation_error:
+        topic = str((plan.context or {}).get("goal", "")).strip()[:120]
+        try:
+            candidate = validate_forecast(plan.forecast, source="pioneer", topic=topic, model=plan.model)
+            user_evidence = " ".join(message["content"] for message in messages[-7:]
+                                     if message["role"] == "user")
+            if (_deadline_mentioned(user_evidence, candidate["deadline"])
+                    and _event_mentioned(user_evidence, candidate["event"], candidate["deadline"])
+                    and _visible_forecast_probability(reply, candidate)):
+                stored_forecast = candidate
+                if not re.search(r"\b(?:track|record|sav)(?:ed|ing)?\b", reply, re.IGNORECASE):
+                    reply += "\n\nI'll track that forecast so we can score it when the outcome is known."
+        except CalibrationError:
+            pass
+    stored_resolution: dict[str, Any] | None = None
+    if plan.resolution:
+        forecast_id = plan.resolution["forecast_id"]
+        target = next((item for item in open_context if item["id"] == forecast_id), None)
+        correction = False
+        if target is None and CORRECTION_CUE.search(text):
+            target = next((item for item in resolved_context if item["id"] == forecast_id), None)
+            correction = (target is not None and target["reported_outcome"] is not plan.resolution["outcome"])
+        if (target is not None and (target in open_context or correction)
+                and _reported_outcome(text, target) is plan.resolution["outcome"]):
+            stored_resolution = {"forecast_id": forecast_id, "outcome": plan.resolution["outcome"],
+                                 "note": text.strip()[:1000]}
+            if not re.search(r"\b(?:record|mark|sav)(?:ed|ing)?\b", reply, re.IGNORECASE):
+                action = "corrected" if correction else "recorded"
+                reply += f"\n\nI've {action} the reported outcome for forecast {forecast_id[:12]}."
     explore = plan.explore_alternative and previous_context and previous_context.get("status") in {"active", "resolved"}
     payload: dict[str, Any] = {"user": text, "assistant": reply, "provider": "openai", "model": plan.model,
                                "decision_requested": decision_requested}
@@ -331,6 +515,10 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         payload["jev_error"] = jev_error
     if conflict:
         payload["history_conflict"] = conflict
+    if stored_forecast:
+        payload["forecast"] = stored_forecast
+    if stored_resolution:
+        payload["resolution"] = stored_resolution
     if case is not None:
         payload["decision"] = {"case": case, "analysis": result}
     elif decision_requested:

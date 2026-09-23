@@ -24,6 +24,7 @@ Most AI chat tools give you one linear thread and no way to compare options side
 - **Value of information** — weigh acting now against waiting for a signal
 - **Reversibility modeling** — account for what's recoverable if an action is later undone
 - **Optional Jev decision attention** — use TypeSafe System One to help Pioneer focus on timing, reversibility, useful information, and tensions with earlier claims
+- **Forecast feedback** — save specific yes/no forecasts with a date or resolution condition, record outcomes you report, compare the forecasts with those reports, and bring relevant history into later estimates
 - **Content-addressed history** — SHA-256-hashed objects, checkable for corruption or tampering
 - **Usage ledger** — track OpenAI/Jev token usage, with optional cost estimation
 - **Local decision engine** — analyze structured decision cases with no API call at all
@@ -157,6 +158,10 @@ Inside `pioneer chat`, type `/help` to see these:
 | `/log` | Show recent saved turns |
 | `/analysis` | Show the latest complete decision calculation |
 | `/usage` | Show recorded API token usage |
+| `/forecast 70% \| EVENT \| DEADLINE [\| TOPIC]` | Save a forecast you supply |
+| `/forecasts` | List unresolved forecasts on this branch |
+| `/resolve ID yes\|no` | Report whether an event happened, or correct an earlier report |
+| `/calibration [pioneer\|user\|all]` | Compare forecasts with reported outcomes |
 | `/decide FILE` | Analyze a structured decision case |
 | `/triage ACTION` | Ask Jev to assess an action |
 | `/model MODEL` | Change the OpenAI model for this session |
@@ -276,6 +281,31 @@ pioneer triage "Launch the product tomorrow"
 
 That manual diagnostic does not replace the conversational decision layer.
 
+## Learning from forecasts
+
+When you explicitly ask Pioneer for the probability of a specific yes/no event with a clear date or resolution condition, it can give a subjective estimate and save it as a forecast. For example: “What are the chances we launch by Friday?” Pioneer records its own forecast only when its visible reply states the same percentage. If the event or resolution condition is unclear, it should ask rather than record a vague prediction. Forecast probabilities are separate from the numbers you supply to the decision engine.
+
+Later, tell Pioneer an unambiguous result such as “We launched Friday.” It can link that user-reported outcome to an open forecast when the event and its deadline are clear. An ambiguous report stays unscored until you clarify it. You can correct an earlier report conversationally (for example, “Actually, we did not launch by Friday”) or inspect and record it directly:
+
+```text
+/forecasts
+/resolve FORECAST_ID yes
+/calibration
+```
+
+You can also track your own estimate with `/forecast 70% | We launch | Friday | Launch timing`, or from a shell:
+
+```bash
+pioneer forecast 70% "We launch" --by Friday --topic "Launch timing"
+pioneer forecasts
+pioneer resolve FORECAST_ID yes
+pioneer calibration --source user --topic "Launch timing"
+```
+
+The forecast ID is a saved commit ID; a unique short prefix is enough for `/resolve`. Each branch sees only forecasts and outcomes in its own ancestry. Recording the opposite result later corrects an outcome while preserving the earlier report.
+
+Calibration reports show the number of resolved forecasts, average predicted probability, user-reported event rate, a Brier score, and reported rates across five confidence ranges. The Brier score compares predictions with those reports; lower is better, and zero means perfect agreement with the recorded results. Pioneer does not independently verify outcomes. After at least five resolved **Pioneer** forecasts on the same topic, Pioneer supplies that history as limited evidence during later turns on that decision. You can ask “How calibrated are you?” for the branch-wide record. Small or selected samples can mislead, so Pioneer does not silently rewrite a new estimate or your decision-case inputs. This is local feedback, not model retraining. Jev's attention scores are not outcome forecasts and are not calibrated by this report.
+
 ## History and storage
 
 Each workspace has a `.pioneer/` directory:
@@ -362,6 +392,10 @@ pioneer [--repo DIR] status
 
 pioneer [--repo DIR] decide FILE [--no-save]
 pioneer [--repo DIR] triage TEXT...
+pioneer [--repo DIR] forecast PROBABILITY EVENT... --by DEADLINE [--topic TOPIC]
+pioneer [--repo DIR] forecasts
+pioneer [--repo DIR] resolve ID yes|no
+pioneer [--repo DIR] calibration [--topic TOPIC] [--source pioneer|user|all]
 
 pioneer [--repo DIR] usage [--prices FILE]
 pioneer [--repo DIR] verify
@@ -379,7 +413,10 @@ pioneer --repo ~/decisions/product-launch status
 Pioneer/
 ├── pioneer/
 │   ├── cli.py         # CLI and interactive terminal
+│   ├── calibration.py # forecasts, outcomes, and reliability scoring
 │   ├── decision.py    # deterministic decision engine
+│   ├── history.py     # bounded recall of earlier branch turns
+│   ├── jev.py         # optional decision attention routing
 │   ├── pipeline.py    # conversational turn pipeline
 │   ├── providers.py   # OpenAI and Jev HTTP adapters
 │   └── state.py       # content-addressed workspace storage
