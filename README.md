@@ -29,7 +29,7 @@ Most AI chat tools give you one linear thread and no way to compare options side
 
 ## Requirements
 
-- Python **3.10+**
+- Python **3.10+** for installation from source; the Windows executable includes Python
 - An OpenAI API key (for `chat` and `ask`)
 - Optionally, a TypeSafe API key (for Jev triage)
 
