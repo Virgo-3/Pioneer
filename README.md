@@ -2,7 +2,13 @@
 
 Pioneer is a conversational AI terminal with branchable local history, API token accounting, and a transparent decision engine. Talk through a choice in ordinary language: Pioneer can offer a provisional view, ask a focused follow-up when it matters, or calculate act versus wait from explicit numbers. Each turn saves the conversation, working context, analysis, and provider usage together.
 
-## Quick start
+## Windows executable
+
+Download `Pioneer.exe` from the [latest release](https://github.com/Virgo-3/Pioneer/releases/latest) and double click it. The first launch creates a workspace under `%LOCALAPPDATA%\Pioneer\workspace`, asks for your OpenAI API key with hidden input, and opens the conversation. If you choose to save the key, Windows encrypts it for your user account under `%APPDATA%\Pioneer\openai-key.dpapi`. An existing `OPENAI_API_KEY` takes precedence. You can press Enter instead to use the local decision tools without a key. Python is not needed to run the executable.
+
+Run `Pioneer.exe --help` in a terminal for the full CLI. With arguments, it behaves like the Python CLI and uses the current directory unless you pass `--repo PATH`. The optional Jev triage still uses `TYPESAFE_API_KEY` from your environment. The Windows build is made by [GitHub Actions](https://github.com/Virgo-3/Pioneer/actions/workflows/windows-exe.yml), which also provides a downloadable build artifact on every push.
+
+## Python quick start
 
 Python 3.10 or newer is required. No runtime packages are needed.
 
