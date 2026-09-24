@@ -33,7 +33,7 @@ class ChatTests(unittest.TestCase):
                                             [{"provider": "openai", "input_tokens": 10, "output_tokens": 6}],
                                             None, "main")
         output, errors = self.chat(["Should we launch?", "/exit"])
-        self.assertIn("Pioneer: A pilot buys you time to learn.", output)
+        self.assertIn("OpenAI: A pilot buys you time to learn.", output)
         self.assertIn("Set OPENAI_API_KEY for conversation", output)
         self.assertNotIn("10 input", output)
         self.assertNotIn("test-model", output)
@@ -48,11 +48,11 @@ class ChatTests(unittest.TestCase):
                      "Current gap from the target: 30 users."))
         output, errors = self.chat(["What should we do?", "/exit"])
         lines = output.splitlines()
-        self.assertIn("Pioneer: I would try the pilot first.", lines)
-        self.assertIn("Pioneer record: Saved the desired outcome: 100 users by Friday.", lines)
-        self.assertIn("Pioneer record: Current gap from the target: 30 users.", lines)
-        self.assertLess(lines.index("Pioneer: I would try the pilot first."),
-                        lines.index("Pioneer record: Saved the desired outcome: 100 users by Friday."))
+        self.assertIn("OpenAI: I would try the pilot first.", lines)
+        self.assertIn("Pioneer check: Saved the desired outcome: 100 users by Friday.", lines)
+        self.assertIn("Pioneer check: Current gap from the target: 30 users.", lines)
+        self.assertLess(lines.index("OpenAI: I would try the pilot first."),
+                        lines.index("Pioneer check: Saved the desired outcome: 100 users by Friday."))
         self.assertEqual(errors, "")
 
     @patch("pioneer.cli.run_turn")
@@ -64,8 +64,43 @@ class ChatTests(unittest.TestCase):
         with redirect_stdout(output):
             _ask(self.store, "Should we pilot?")
         self.assertEqual(output.getvalue().splitlines(),
-                         ["That plan could work if the pilot is cheap.",
-                          "Pioneer record: Saved forecast for Friday."])
+                         ["OpenAI: That plan could work if the pilot is cheap.",
+                          "Pioneer check: Saved forecast for Friday."])
+
+    @patch("pioneer.cli.run_turn")
+    def test_ask_attributes_source_and_challenge_separately(self, run_turn):
+        source = "a" * 64
+        run_turn.return_value = TurnOutcome(
+            "I think we can launch now.", "b" * 64, "test-model", [], None, "main",
+            history_challenge={"commit": source, "role": "assistant", "provider": "openai",
+                               "quote": "We should wait for legal review.",
+                               "challenge": "What changed your view?"})
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _ask(self.store, "Should we launch?")
+        lines = output.getvalue().splitlines()
+        self.assertEqual(lines[0], "OpenAI: I think we can launch now.")
+        self.assertIn(f"Pioneer source {source[:12]}: OpenAI said", lines[1])
+        self.assertEqual(lines[2], "OpenAI challenge: What changed your view?")
+
+    def test_source_inspects_both_sides_on_current_branch(self):
+        source = self.store.commit("turn", {"user": "Would a pilot preserve our options?",
+                                            "assistant": "Yes, if the cost is small.",
+                                            "provider": "openai"})
+        output, errors = self.chat([f"/source {source[:12]}", "/exit"])
+        self.assertIn(f"Source {source} on main:", output)
+        self.assertIn("You: Would a pilot preserve our options?", output)
+        self.assertIn("OpenAI: Yes, if the cost is small.", output)
+        self.assertEqual(errors, "")
+
+    def test_source_rejects_turn_outside_current_branch(self):
+        self.store.create_branch("alternate")
+        source = self.store.commit("turn", {"user": "Private main branch premise.",
+                                            "assistant": "I hear you."})
+        self.store.switch("alternate")
+        output, errors = self.chat([f"/source {source[:12]}", "/exit"])
+        self.assertNotIn("Private main branch premise.", output)
+        self.assertIn("That source is not on the current branch", errors)
 
     def test_context_and_branch_orientation_follow_saved_history(self):
         self.store.commit("turn", {"user": "Should we launch?", "assistant": "Try a pilot.",
@@ -116,6 +151,7 @@ class ChatTests(unittest.TestCase):
         self.assertIn("Use /decide FILE", errors)
         self.assertEqual(errors.count("Unknown command"), 3)
         self.assertIn("/branches", output)
+        self.assertIn("/source ID", output)
         self.assertNotIn("/context", output)
         self.assertNotIn("/status", output)
         self.assertNotIn("/triage", output)

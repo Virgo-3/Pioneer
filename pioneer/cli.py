@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,9 +161,36 @@ def _ask(store: Store, text: str, model: str | None = None, *, interactive: bool
     if outcome.branched_from:
         print(f"Exploring on {outcome.branch}. Your conversation on {outcome.branched_from} is still there.")
     if outcome.text:
-        print(f"Pioneer: {outcome.text}" if interactive else outcome.text)
+        speaker = "Pioneer" if outcome.model == "local" else "OpenAI"
+        print(f"{speaker}: {outcome.text}")
     for notice in outcome.notices:
-        print(f"Pioneer record: {notice}")
+        print(f"Pioneer check: {notice}")
+    if outcome.history_challenge:
+        challenge = outcome.history_challenge
+        source = ("You" if challenge["role"] == "user" else
+                  "Pioneer" if challenge.get("provider") == "local" else "OpenAI")
+        print(f"Pioneer source {challenge['commit'][:12]}: {source} said “{challenge['quote']}”")
+        print(f"OpenAI challenge: {challenge['challenge']}")
+
+
+def _show_source(store: Store, prefix: str) -> None:
+    reference = prefix.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{8,64}", reference):
+        raise StoreError("Use /source with at least eight characters from a cited commit ID.")
+    matches = [(object_id, obj) for object_id, obj in store.log()
+               if object_id.startswith(reference)]
+    if not matches:
+        raise StoreError("That source is not on the current branch.")
+    if len(matches) != 1:
+        raise StoreError("That source ID is ambiguous; use more characters.")
+    object_id, obj = matches[0]
+    if obj["kind"] != "turn":
+        raise StoreError("That source is not a conversation turn.")
+    payload = obj["payload"]
+    print(f"Source {object_id} on {store.current_branch()}:")
+    print(f"You: {payload['user']}")
+    speaker = "Pioneer" if payload.get("provider") == "local" else "OpenAI"
+    print(f"{speaker}: {payload['assistant']}")
 
 
 def _triage(store: Store, text: str) -> None:
@@ -613,6 +641,7 @@ def _chat(store: Store, model: str | None) -> None:
                     print("  /clear                  Clear the terminal display")
                     print("  /reset [BRANCH]         Restart main or a named branch; save its old history")
                     print("  /log                    Show recent saved turns")
+                    print("  /source ID              Read both sides of a cited turn")
                     print("  /usage                  Show recorded API token usage")
                     print("  /help advanced          Exact records, calculations, and settings")
                     print("  /exit                   Leave the chat")
@@ -665,6 +694,8 @@ def _chat(store: Store, model: str | None) -> None:
                     payload = obj["payload"]
                     title = payload.get("user") or payload.get("title") or payload.get("text") or obj["kind"]
                     print(f"{object_id[:12]}  {obj['kind']:<8}  {_brief(title, 72)}")
+            elif command == "/source":
+                _show_source(store, _required(argument, "/source ID"))
             elif command == "/context" and not argument:
                 _print_context(store)
             elif command == "/usage" and not argument:

@@ -11,7 +11,8 @@ from pioneer.objectives import objective_records, outcome_report
 from pioneer.pipeline import (_last_jev_assessment, _reported_outcome,
                               _visible_forecast_probability, run_turn)
 from pioneer.providers import (SYSTEM_INSTRUCTIONS, TURN_INSTRUCTIONS, ProviderError,
-                               TurnPlan, ask_openai, assess_jev, compose_turn, triage_jev)
+                               HistoryReview, TurnPlan, ask_openai, assess_jev,
+                               compose_turn, review_history, triage_jev)
 from pioneer.state import Store, StoreError
 
 
@@ -198,14 +199,14 @@ class ProviderTests(unittest.TestCase):
                 "context": {"status": "active", "goal": "Decide whether to launch", "options": ["launch"],
                             "known": [], "uncertain": ["demand"], "provisional_view": "Try a pilot",
                             "next_questions": ["What would a pilot cost?"]},
-                "explore_alternative": False, "history_conflict": None})}]}],
+                "explore_alternative": False})}]}],
             "usage": {"input_tokens": 20, "output_tokens": 5}}
         plan = compose_turn([{"role": "user", "content": "Should I launch?"}], model="test-model")
         self.assertTrue(plan.decision_requested)
         self.assertEqual(plan.missing, ["state probabilities"])
         self.assertEqual(plan.context["provisional_view"], "Try a pilot")
         self.assertEqual(post.call_args.args[2]["text"]["format"]["type"], "json_schema")
-        self.assertIn("history_conflict", post.call_args.args[2]["text"]["format"]["schema"]["required"])
+        self.assertNotIn("history_conflict", post.call_args.args[2]["text"]["format"]["schema"]["required"])
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
@@ -215,7 +216,7 @@ class ProviderTests(unittest.TestCase):
         forecast = {"event": "Launch by Friday", "probability": 0.7, "deadline": "Friday"}
         response = {"reply": "I estimate a 70% chance of launching by Friday.",
                     "decision_requested": False, "case_json": None, "missing": [],
-                    "context": context, "explore_alternative": False, "history_conflict": None,
+                    "context": context, "explore_alternative": False,
                     "forecast": forecast, "resolution": None}
         post.return_value = {"model": "test", "output": [{"content": [
             {"type": "output_text", "text": json.dumps(response)}]}],
@@ -243,7 +244,7 @@ class ProviderTests(unittest.TestCase):
         response = {"reply": "Let's compare the result with your goal.",
                     "decision_requested": False, "case_json": None, "missing": [],
                     "context": context, "explore_alternative": False,
-                    "history_conflict": None, "forecast": None, "resolution": None,
+                    "forecast": None, "resolution": None,
                     "objective": objective, "actual": actual}
         post.return_value = {"model": "test", "output": [{"content": [
             {"type": "output_text", "text": json.dumps(response)}]}]}
@@ -262,25 +263,45 @@ class ProviderTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
-    def test_older_history_is_input_data_and_conflict_is_structured(self, post):
+    def test_older_history_is_input_data_without_same_turn_challenge(self, post):
         context = {"status": "active", "goal": "Launch", "options": [], "known": [],
                    "uncertain": [], "provisional_view": "Wait", "next_questions": []}
         evidence = [{"commit": "a" * 64, "quote": "Wait for legal review before launch."}]
-        guidance = {"attention": {"reversibility": "focus"}, "priorities": ["reversibility"],
-                    "response_cues": ["Check what can be undone."]}
+        guidance = {"attention": {"reversibility": "focus"}, "priorities": ["reversibility"]}
         post.return_value = {"model": "test", "output": [{"content": [{"type": "output_text", "text": json.dumps({
             "reply": "A launch now may be premature.", "decision_requested": True, "case_json": None,
-            "missing": [], "context": context, "explore_alternative": False,
-            "history_conflict": {"commit": "a" * 64, "quote": "Wait for legal review",
-                                 "challenge": "Has the review finished?"}})}]}]}
+            "missing": [], "context": context, "explore_alternative": False})}]}]}
         plan = compose_turn([{"role": "user", "content": "Launch now?"}], context=context,
                             history_evidence=evidence, jev_guidance=guidance)
         payload = post.call_args.args[2]
         self.assertEqual(payload["input"][-1]["content"], "Launch now?")
-        self.assertIn("retrieved_older_user_statements", payload["input"][-2]["content"])
+        self.assertIn("retrieved_branch_statements", payload["input"][-2]["content"])
         self.assertIn("decision_attention", payload["input"][-2]["content"])
         self.assertNotIn("Wait for legal review", payload["instructions"])
-        self.assertEqual(plan.history_conflict["commit"], "a" * 64)
+        self.assertIsNone(plan.history_conflict)
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
+    @patch("pioneer.providers._post")
+    def test_history_review_is_separate_and_attributes_the_quoted_speaker(self, post):
+        evidence = [{"commit": "a" * 64, "role": "assistant", "provider": "openai",
+                     "quote": "I thought the pilot would take one week."}]
+        conflict = {"commit": evidence[0]["commit"], "role": "assistant",
+                    "quote": "pilot would take one week",
+                    "challenge": "What changed your estimate?"}
+        post.return_value = {"id": "review_1", "model": "test", "output": [{"content": [
+            {"type": "output_text", "text": json.dumps({"conflict": conflict})}]}],
+            "usage": {"input_tokens": 11, "output_tokens": 5}}
+        review = review_history("A pilot may take a month.", evidence,
+                                user_text="What do you think now?", model="test")
+        self.assertEqual(review.conflict, conflict)
+        self.assertEqual((review.input_tokens, review.output_tokens), (11, 5))
+        payload = post.call_args.args[2]
+        self.assertEqual(payload["input"][0]["role"], "user")
+        sent = json.loads(payload["input"][0]["content"])
+        self.assertEqual(sent["finished_assistant_reply"], "A pilot may take a month.")
+        self.assertEqual(sent["retrieved_branch_statements"][0]["role"], "assistant")
+        self.assertNotIn("history_conflict", payload["text"]["format"]["schema"]["required"])
+        self.assertIn("conflict", payload["text"]["format"]["schema"]["required"])
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
@@ -302,6 +323,10 @@ class PipelineTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(self.temp.name)
         self.store.init()
+        self.review_patcher = patch("pioneer.pipeline.review_history")
+        self.review = self.review_patcher.start()
+        self.addCleanup(self.review_patcher.stop)
+        self.review.return_value = HistoryReview(None, "test", 3, 2, "history_1")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -333,7 +358,7 @@ class PipelineTests(unittest.TestCase):
         outcome = run_turn(self.store, text)
         self.assertEqual(outcome.decision["recommendation"]["kind"], "wait")
         self.assertEqual(outcome.text, "Here is the comparison.")
-        self.assertIn("I would wait", "\n".join(outcome.notices))
+        self.assertIn("favors waiting", "\n".join(outcome.notices))
         self.assertEqual(self.store.read_object(outcome.commit)["payload"]["assistant"], outcome.text)
         self.assertEqual(self.store.read_object(outcome.commit)["payload"]["notices"], list(outcome.notices))
         self.assertEqual(len(self.store.log()), 2)
@@ -363,6 +388,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(outcome.text, "Hello.")
         self.assertEqual(outcome.notices, ())
         self.assertEqual(compose.call_args.kwargs["jev_guidance"], None)
+        self.review.assert_not_called()
         self.assertNotIn("jev", self.store.read_object(outcome.commit)["payload"])
         self.assertEqual(len(self.store.usage()), 1)
 
@@ -404,7 +430,7 @@ class PipelineTests(unittest.TestCase):
         run_turn(self.store, "What did you recommend?")
         checked = compose.call_args.kwargs["verified_decision"]
         self.assertTrue(checked)
-        self.assertIn("I would wait", checked)
+        self.assertIn("favors waiting", checked)
         assistant_history = [item["content"] for item in compose.call_args.args[0]
                              if item["role"] == "assistant"]
         self.assertEqual(assistant_history, ["I can compare those choices.", "You're welcome."])
@@ -430,8 +456,8 @@ class PipelineTests(unittest.TestCase):
         run_turn(self.store, "What did you recommend for the launch?")
         checked = compose.call_args.kwargs["verified_decision"]
         self.assertTrue(checked)
-        self.assertIn("launch has the highest expected payoff", checked)
-        self.assertNotIn("hold has the highest expected payoff", checked)
+        self.assertIn("checked calculation favors launch", checked)
+        self.assertNotIn("checked calculation favors hold", checked)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -567,74 +593,77 @@ class PipelineTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
-    def test_rejected_target_cannot_leave_false_saved_claim_in_reply(self, compose):
+    def test_rejected_target_preserves_openai_claim_and_marks_missing_record(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
                      "deadline": "Friday", "action": ""}
-        compose.return_value = TurnPlan("I've saved your target of 100 paid users by Friday.",
+        reply = "I've saved your target of 100 paid users by Friday."
+        compose.return_value = TurnPlan(reply,
                                         False, None, [], "test", 10, 5, "r", objective=objective)
         outcome = run_turn(self.store, "I'm considering a launch, but haven't settled on a target.")
         payload = self.store.read_object(outcome.commit)["payload"]
         self.assertNotIn("objective", payload)
-        self.assertNotIn("I've saved your target", outcome.text)
-        self.assertIn("not saved", "\n".join(outcome.notices).casefold())
-        self.assertEqual(payload["assistant"], outcome.text)
+        self.assertEqual(outcome.text, reply)
+        self.assertEqual(payload["assistant"], reply)
+        self.assertTrue(any("target" in item.casefold() for item in outcome.notices))
+        self.assertEqual(payload["notices"], list(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
-    def test_unproposed_target_cannot_be_claimed_as_previously_saved(self, compose):
+    def test_unproposed_target_claim_is_preserved_with_separate_check(self, compose):
+        reply = "I have already saved your target. We can decide timing next."
         compose.return_value = TurnPlan(
-            "I have already saved your target. We can decide timing next.",
+            reply,
             False, None, [], "test", 10, 5, "r")
         outcome = run_turn(self.store, "I may launch, but haven't set a target yet.")
         payload = self.store.read_object(outcome.commit)["payload"]
         self.assertNotIn("objective", payload)
-        self.assertNotIn("I have already saved your target", outcome.text)
-        self.assertIn("We can decide timing next.", outcome.text)
-        self.assertIn("not saved", "\n".join(outcome.notices).casefold())
-        self.assertEqual(payload["assistant"], outcome.text)
+        self.assertEqual(outcome.text, reply)
+        self.assertEqual(payload["assistant"], reply)
+        self.assertTrue(any("target" in item.casefold() for item in outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
-    def test_false_forecast_claim_is_removed_while_real_target_notice_remains(self, compose):
+    def test_false_forecast_claim_stays_attributed_while_target_check_remains(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
                      "deadline": "Friday", "action": ""}
+        reply = "I saved your forecast of 70% for Friday. The target is clear."
         compose.return_value = TurnPlan(
-            "I saved your forecast of 70% for Friday. The target is clear.",
+            reply,
             False, None, [], "test", 10, 5, "r", objective=objective)
         outcome = run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
         payload = self.store.read_object(outcome.commit)["payload"]
         self.assertIn("objective", payload)
         self.assertNotIn("forecast", payload)
-        self.assertNotIn("I saved your forecast", outcome.text)
-        self.assertIn("The target is clear.", outcome.text)
+        self.assertEqual(outcome.text, reply)
+        self.assertEqual(payload["assistant"], reply)
         records = "\n".join(outcome.notices)
         self.assertIn("Target saved", records)
-        self.assertIn("Forecast not saved", records)
+        self.assertIn("forecast", records.casefold())
         self.assertEqual(payload["notices"], list(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
-    def test_accepted_target_does_not_preserve_conflicting_save_claim(self, compose):
+    def test_conflicting_save_description_remains_authored_with_correct_record(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
                      "deadline": "Friday", "action": ""}
+        reply = "I saved your target of 200 users Monday. Let's review the path."
         compose.return_value = TurnPlan(
-            "I saved your target of 200 users Monday. Let's review the path.",
+            reply,
             False, None, [], "test", 10, 5, "r", objective=objective)
         outcome = run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
         payload = self.store.read_object(outcome.commit)["payload"]
         self.assertEqual(payload["objective"]["desired"], 100)
         self.assertEqual(payload["objective"]["deadline"], "Friday")
-        self.assertNotIn("I saved your target of 200 users Monday", outcome.text)
-        self.assertIn("Let's review the path.", outcome.text)
-        self.assertEqual(payload["assistant"], outcome.text)
+        self.assertEqual(outcome.text, reply)
+        self.assertEqual(payload["assistant"], reply)
         records = "\n".join(outcome.notices)
         self.assertIn("Target saved", records)
         self.assertIn("100 users", records)
         self.assertIn("Friday", records)
-        self.assertNotIn("not saved", records.casefold())
+        self.assertNotIn("200 users", records)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -657,6 +686,56 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(confirmed.notices, ())
         self.assertNotIn("notices", payload)
         self.assertNotIn("objective", payload)
+        self.assertEqual(len(objective_records(self.store)), 1)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_old_target_does_not_confirm_false_new_save_claim(self, compose):
+        old_target = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                      "desired": 100, "direction": "at_least", "unit": "users",
+                      "deadline": "Friday", "action": ""}
+        compose.return_value = TurnPlan("That's a useful target.", False, None, [],
+                                        "test", 10, 5, "r1", objective=old_target)
+        first = run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
+        self.assertIn("objective", self.store.read_object(first.commit)["payload"])
+
+        reply = "I saved your target of 200 paid users by Monday."
+        compose.return_value = TurnPlan(reply, False, None, [], "test", 10, 5, "r2")
+        second = run_turn(self.store, "I'm considering a new target for Monday, but haven't chosen it.")
+        payload = self.store.read_object(second.commit)["payload"]
+        self.assertEqual(second.text, reply)
+        self.assertEqual(payload["assistant"], reply)
+        self.assertNotIn("objective", payload)
+        self.assertEqual(len(objective_records(self.store)), 1)
+        self.assertTrue(any("target" in item.casefold() and "this turn" in item.casefold()
+                            for item in second.notices))
+
+        new_target = {**old_target, "desired": 200, "deadline": "Monday"}
+        compose.return_value = TurnPlan(reply, False, None, [], "test", 10, 5, "r3",
+                                        objective=new_target)
+        third = run_turn(self.store, "I still haven't chosen a new target.")
+        third_payload = self.store.read_object(third.commit)["payload"]
+        self.assertEqual(third.text, reply)
+        self.assertNotIn("objective", third_payload)
+        self.assertEqual(len(objective_records(self.store)), 1)
+        self.assertTrue(any("target" in item.casefold() and "did not save" in item.casefold()
+                            for item in third.notices))
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_old_target_does_not_verify_revised_target_history_claim(self, compose):
+        old_target = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                      "desired": 100, "direction": "at_least", "unit": "users",
+                      "deadline": "Friday", "action": ""}
+        compose.return_value = TurnPlan("That's a clear target.", False, None, [],
+                                        "test", 10, 5, "r1", objective=old_target)
+        run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
+        reply = "I have saved your revised target."
+        compose.return_value = TurnPlan(reply, False, None, [], "test", 10, 5, "r2")
+        outcome = run_turn(self.store, "Did you save my revised target?")
+        self.assertEqual(outcome.text, reply)
+        self.assertTrue(any("could not verify" in notice and "target" in notice
+                            for notice in outcome.notices))
         self.assertEqual(len(objective_records(self.store)), 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
@@ -953,8 +1032,11 @@ class PipelineTests(unittest.TestCase):
                                        "openai-test", 10, 5, "resp_4")
         outcome = run_turn(self.store, "Act pays 10 if good and -10 if bad. What should I do?")
         self.assertIsNone(outcome.decision)
-        self.assertIn("can't trace every number", outcome.text)
-        self.assertNotIn("decision", self.store.read_object(outcome.commit)["payload"])
+        self.assertEqual(outcome.text, "I used your figures.")
+        payload = self.store.read_object(outcome.commit)["payload"]
+        self.assertEqual(payload["assistant"], outcome.text)
+        self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
+        self.assertNotIn("decision", payload)
         self.assertEqual(len(self.store.usage()), 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
@@ -967,7 +1049,8 @@ class PipelineTests(unittest.TestCase):
                                        "openai-test", 10, 5, "resp_5")
         outcome = run_turn(self.store, "Good 50%, bad 50%. Invest pays 10 or -10; hold pays 0. Should I wait?")
         self.assertIsNone(outcome.decision)
-        self.assertIn("Waiting could change the choice", outcome.text)
+        self.assertEqual(outcome.text, "Invest now.")
+        self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -985,7 +1068,8 @@ class PipelineTests(unittest.TestCase):
         run_turn(self.store, "Should I wait before investing?")
         outcome = run_turn(self.store, "Good 50%, bad 50%; invest pays 10 or -10, hold pays 0.")
         self.assertIsNone(outcome.decision)
-        self.assertIn("Waiting could change the choice", outcome.text)
+        self.assertEqual(outcome.text, "I have the payoffs.")
+        self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -1003,7 +1087,8 @@ class PipelineTests(unittest.TestCase):
         run_turn(self.store, "For the old project, good is 90%, bad 10%; go pays 10 or -10 and hold pays 0.")
         outcome = run_turn(self.store, "For a new project, should I go?")
         self.assertIsNone(outcome.decision)
-        self.assertIn("can't trace every number", outcome.text)
+        self.assertEqual(outcome.text, "I can calculate.")
+        self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -1022,26 +1107,51 @@ class PipelineTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
-    def test_older_statement_can_ground_a_challenge(self, compose):
+    def test_history_review_cites_prior_user_without_rewriting_reply(self, compose):
         older = "We must finish legal review before the public launch."
         source = self.store.commit("turn", {"user": older, "assistant": "Understood."})
         for index in range(20):
             self.store.commit("turn", {"user": f"Unrelated update {index}", "assistant": "Okay."})
-        conflict = {"commit": source, "quote": "finish legal review before the public launch",
+        conflict = {"commit": source, "role": "user",
+                    "quote": "finish legal review before the public launch",
                     "challenge": "Has legal review finished, or are you changing that condition?"}
-        compose.return_value = TurnPlan("Launching now has a condition to resolve.", True, None, [],
-                                        "test", 10, 5, "r", None, False, conflict)
+        self.review.return_value = HistoryReview(conflict, "test", 14, 6, "history_1")
+        reply = "Launching now seems worthwhile."
+        compose.return_value = TurnPlan(reply, True, None, [], "test", 10, 5, "r")
         outcome = run_turn(self.store, "Let's do the public launch before legal review is finished.")
-        evidence = compose.call_args.kwargs["history_evidence"]
-        self.assertEqual(evidence[0]["commit"], source)
-        self.assertEqual(outcome.text, "Launching now has a condition to resolve.")
-        self.assertIn("Earlier you said", "\n".join(outcome.notices))
-        self.assertIn(source[:10], "\n".join(outcome.notices))
-        self.assertIn("Has legal review finished", "\n".join(outcome.notices))
+        self.assertFalse(compose.call_args.kwargs["history_evidence"])
+        self.review.assert_called_once()
+        self.assertEqual(self.review.call_args.args[0], reply)
+        self.assertIn(source, {item["commit"] for item in self.review.call_args.args[1]})
+        self.assertEqual(outcome.text, reply)
+        self.assertEqual(outcome.history_challenge, conflict)
         payload = self.store.read_object(outcome.commit)["payload"]
-        self.assertEqual(payload["assistant"], outcome.text)
-        self.assertEqual(payload["notices"], list(outcome.notices))
-        self.assertEqual(payload["history_conflict"], conflict)
+        self.assertEqual(payload["assistant"], reply)
+        self.assertEqual(payload["history_challenge"], conflict)
+        self.assertEqual([item["purpose"] for item in self.store.usage() if "purpose" in item],
+                         ["history_review"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_history_review_cites_prior_assistant_with_correct_role(self, compose):
+        source = self.store.commit("turn", {
+            "user": "How long might a pilot take?", "assistant": "The pilot might take one week.",
+            "provider": "openai"})
+        for index in range(20):
+            self.store.commit("turn", {"user": f"Unrelated update {index}", "assistant": "Okay."})
+        conflict = {"commit": source, "role": "assistant", "quote": "pilot might take one week",
+                    "challenge": "What changed your estimate?"}
+        self.review.return_value = HistoryReview(conflict, "test", 14, 6, "history_2")
+        reply = "I now think it may take a month."
+        compose.return_value = TurnPlan(reply, False, None, [], "test", 10, 5, "r")
+        outcome = run_turn(self.store, "What did you say earlier about the pilot's duration?")
+        self.assertIn(source, {item["commit"] for item in
+                               compose.call_args.kwargs["history_evidence"]})
+        self.assertEqual(outcome.text, reply)
+        self.assertEqual(outcome.history_challenge["role"], "assistant")
+        self.assertEqual(outcome.history_challenge["provider"], "openai")
+        self.assertEqual(outcome.history_challenge["commit"], source)
+        self.assertEqual(self.store.read_object(outcome.commit)["payload"]["assistant"], reply)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -1049,14 +1159,49 @@ class PipelineTests(unittest.TestCase):
         self.store.commit("turn", {"user": "Wait for legal review before launch.", "assistant": "Okay."})
         for index in range(20):
             self.store.commit("turn", {"user": f"Update {index}", "assistant": "Okay."})
-        compose.return_value = TurnPlan("Let's examine it.", True, None, [], "test", 10, 5,
-                                        "r", None, False,
-                                        {"commit": "f" * 64, "quote": "Wait for legal review",
-                                         "challenge": "Why did you change your mind?"})
+        self.review.return_value = HistoryReview(
+            {"commit": "f" * 64, "role": "user", "quote": "Wait for legal review",
+             "challenge": "Why did you change your mind?"}, "test", 14, 6, "history_3")
+        compose.return_value = TurnPlan("Let's examine it.", True, None, [], "test", 10, 5, "r")
         outcome = run_turn(self.store, "Launch before legal review?")
         self.assertEqual(outcome.text, "Let's examine it.")
-        self.assertEqual(outcome.notices, ())
-        self.assertNotIn("history_conflict", self.store.read_object(outcome.commit)["payload"])
+        self.assertIsNone(outcome.history_challenge)
+        self.assertTrue(any("history citation" in item for item in outcome.notices))
+        self.assertNotIn("history_challenge", self.store.read_object(outcome.commit)["payload"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_history_quote_cannot_be_attributed_to_wrong_speaker(self, compose):
+        source = self.store.commit("turn", {
+            "user": "We should wait for legal review.",
+            "assistant": "I agree that review matters.", "provider": "openai"})
+        self.review.return_value = HistoryReview(
+            {"commit": source, "role": "assistant", "quote": "wait for legal review",
+             "challenge": "Did you change your view?"}, "test", 9, 4, "history_4")
+        reply = "I think launch now is reasonable."
+        compose.return_value = TurnPlan(reply, False, None, [], "test", 10, 5, "r")
+        outcome = run_turn(self.store, "Should we wait for legal review or launch?")
+        self.assertEqual(outcome.text, reply)
+        self.assertIsNone(outcome.history_challenge)
+        self.assertNotIn("history_challenge", self.store.read_object(outcome.commit)["payload"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_history_review_failure_preserves_reply_and_records_usage(self, compose):
+        self.store.commit("turn", {"user": "We discussed a pilot.", "assistant": "A week may suffice."})
+        reply = "The pilot may take longer than a week."
+        compose.return_value = TurnPlan(reply, False, None, [], "test", 10, 5, "answer_1")
+        self.review.side_effect = ProviderError("Review failed", usage={
+            "provider": "openai", "model": "test", "input_tokens": 12,
+            "output_tokens": 4, "response_id": "review_bad"})
+        outcome = run_turn(self.store, "What now about the pilot?")
+        payload = self.store.read_object(outcome.commit)["payload"]
+        self.assertEqual(outcome.text, reply)
+        self.assertEqual(payload["assistant"], reply)
+        self.assertIsNone(outcome.history_challenge)
+        self.assertIn("Review failed", payload["history_review_error"])
+        self.assertTrue(any("history check" in item for item in outcome.notices))
+        self.assertEqual([entry["input_tokens"] for entry in self.store.usage()], [10, 12])
 
     def test_retrieval_is_bounded_and_stays_on_active_branch(self):
         self.store.create_branch("alternate")
@@ -1116,9 +1261,11 @@ class PipelineTests(unittest.TestCase):
         current = "Should we launch? Launch pays 5 if good, -5 if bad; hold pays 0."
         outcome = run_turn(self.store, current)
         self.assertEqual(compose.call_args.args[0], [{"role": "user", "content": current}])
-        self.assertTrue(compose.call_args.kwargs["history_evidence"])
+        self.assertFalse(compose.call_args.kwargs["history_evidence"])
+        self.assertTrue(self.review.call_args.args[1])
         self.assertIsNone(outcome.decision)
-        self.assertIn("can't trace every number", outcome.text)
+        self.assertEqual(outcome.text, "Here is the result.")
+        self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -1133,9 +1280,11 @@ class PipelineTests(unittest.TestCase):
         compose.return_value = TurnPlan("Here is the result.", True, json.dumps(case), [],
                                         "test", 10, 5, "r")
         outcome = run_turn(self.store, "Should we launch now?")
-        self.assertTrue(compose.call_args.kwargs["history_evidence"])
+        self.assertFalse(compose.call_args.kwargs["history_evidence"])
+        self.assertTrue(self.review.call_args.args[1])
         self.assertIsNone(outcome.decision)
-        self.assertIn("can't trace every number", outcome.text)
+        self.assertEqual(outcome.text, "Here is the result.")
+        self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "", "OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")

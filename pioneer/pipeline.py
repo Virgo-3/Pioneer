@@ -13,28 +13,26 @@ from typing import Any
 from .calibration import (CalibrationError, calibration_context, calibration_report,
                           forecast_records, validate_forecast)
 from .decision import DecisionError, analyze
-from .history import recent_messages, retrieve_history, verified_conflict
+from .history import RECALL_CUE, recent_messages, retrieve_history, verified_conflict
 from .jev import make_jev_guidance, select_jev_context, should_consult_jev
 from .objectives import (ObjectiveError, compare_objective, objective_records,
                          outcome_report, validate_objective)
-from .providers import ProviderError, assess_jev, compose_turn
+from .providers import ProviderError, assess_jev, compose_turn, review_history
 from .state import Store, StoreError
 
 
 NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?|(?<![\w\d])[-+]?\.\d+%?")
 WAIT_WORD = re.compile(r"\b(wait|waiting|delay|defer|postpone|hold off)\b", re.IGNORECASE)
 UNDO_WORD = re.compile(r"\b(undo|revert|reverse|reversible|rollback|roll back)\b", re.IGNORECASE)
-CONCLUSION_WORD = re.compile(
-    r"\b(recommend\w*|should|would|better|best|prefer\w*|highest|lowest|payoff|expected|wait|waiting|act|choose)\b",
-    re.IGNORECASE,
-)
 PERSISTENCE_CLAIM = re.compile(
     r"\b(?:(?:i|we|pioneer)(?:['’]ve| have)?\s+"
     r"(?:(?:already|just|now)\s+)?(?:saved|logged|stored|tracked|recorded|marked)\s+"
-    r"(?:(?:your|the|this|that|a|an)\s+)?"
+    r"(?:(?:your|my|the|this|that|a|an)\s+)?"
+    r"(?:(?:new|revised|updated|changed|latest|current|another|different|old|previous|prior)\s+)?"
     r"(?P<active_kind>forecast outcome|reported outcome|forecast|prediction|target|goal|"
     r"actual|result|outcome|record)\b|"
-    r"(?:your|the|this)\s+"
+    r"(?:your|my|the|this)\s+"
+    r"(?:(?:new|revised|updated|changed|latest|current|another|different|old|previous|prior)\s+)?"
     r"(?P<passive_kind>forecast outcome|reported outcome|forecast|prediction|target|goal|"
     r"actual|result|outcome|record)\s+(?:has been|was|is)\s+"
     r"(?:(?:already|just|now)\s+)?(?:saved|logged|stored|tracked|recorded|marked)\b|"
@@ -60,6 +58,8 @@ SAVE_HISTORY_QUERY = re.compile(
     r"log|logged|store|stored)\b",
     re.IGNORECASE,
 )
+SPECIFIC_SAVE_CUE = re.compile(r"\b(?:new|revised|updated|changed|latest|current|another|different)\b",
+                               re.IGNORECASE)
 FORECAST_REQUEST = re.compile(
     r"\b(?:how likely|how confident|what(?:'s| is| are) (?:the )?(?:chances?|odds|probability)|"
     r"(?:give|make) (?:me )?(?:your |a )?(?:forecast|probability estimate|odds)|"
@@ -113,6 +113,7 @@ class TurnOutcome:
     branch: str
     branched_from: str | None = None
     notices: tuple[str, ...] = ()
+    history_challenge: dict[str, str] | None = None
 
 
 def _usage(provider: str, result: Any) -> dict[str, Any]:
@@ -200,17 +201,19 @@ def format_analysis(case: dict[str, Any], result: dict[str, Any]) -> str:
         information_value = wait["value_of_information"]
         wait_cost = wait["delay_cost"] + wait["information_cost"]
         if result["recommendation"]["kind"] == "wait":
-            opening = (f"Given your estimates, I would wait for the signal. Its expected payoff is "
+            opening = (f"Given your estimates, the checked calculation favors waiting for the signal. "
+                       f"Its expected payoff is "
                        f"{wait['value']:,.2f} {units}, versus {now_value:,.2f} from the best move now ({label(best_now)}).")
         else:
-            opening = (f"Given your estimates, {label(best_now)} looks better now: {now_value:,.2f} {units}, "
+            opening = (f"Given your estimates, the checked calculation favors {label(best_now)} now: "
+                       f"{now_value:,.2f} {units}, "
                        f"versus {wait['value']:,.2f} from waiting for the signal.")
         next_moves = "; ".join(f"{label(signal)} would favor {label(info['best_action'])}"
                                 for signal, info in wait["signals"].items())
         lines = [opening, f"The option to change course after learning is worth {information_value:,.2f} "
                  f"before {wait_cost:,.2f} in waiting costs. If you wait, {next_moves}."]
     else:
-        lines = [f"Given your estimates, {label(best_now)} has the highest expected payoff "
+        lines = [f"Given your estimates, the checked calculation favors {label(best_now)}, with the highest expected payoff "
                  f"({now_value:,.2f} {units})."]
     reversals = [(action, state) for action, cells in result["outcomes"].items()
                  for state, cell in cells.items() if cell["reversed"]]
@@ -320,68 +323,29 @@ def _branch_name(text: str) -> str:
     return f"explore-{slug}-{uuid.uuid4().hex[:6]}"
 
 
-def _validation_reply(error: str) -> str:
-    if "numbers you did not provide" in error:
-        return ("I can work with those possibilities, but I can't trace every number in the draft to "
-                "one you gave me. Which estimate would you use for the uncertain outcome?")
-    if "To compare waiting" in error or "delay cost" in error:
-        return ("Waiting could change the choice. What could you learn by waiting, and what would "
-                "the delay cost you? A rough range is fine for discussing it; I need explicit numbers "
-                "only for a calculation.")
-    if "reversal" in error:
-        return "If you changed course afterward, what would remain lost, and what would undoing it cost?"
-    return "I can talk through the tradeoff, but I need to clear up one assumption before calculating: " + error
-
-
-def _analysis_framing(reply: str) -> str:
-    """Use only a short, nonnumeric preface before the verified calculation."""
-    framing = " ".join(reply.split())
-    if len(framing) > 180 or NUMBER.search(framing) or CONCLUSION_WORD.search(framing):
-        return ""
-    return framing
-
-
-def _remove_unverified_save_claims(reply: str, saved_now: dict[str, bool],
-                                   saved_before: dict[str, bool]) -> tuple[str, set[str]]:
-    """Keep bare, true history answers; use receipts for new saves and details."""
-    sentences = re.split(r"(?<=[.!?])\s+", reply.strip())
-    kept: list[str] = []
+def _unsupported_save_claims(reply: str, saved_now: dict[str, bool],
+                             saved_before: dict[str, bool], *,
+                             allow_previous: bool = False) -> set[str]:
+    """Identify checkable claims without changing the model's words."""
     unsupported: set[str] = set()
-    for sentence in sentences:
-        matches = list(PERSISTENCE_CLAIM.finditer(sentence))
-        claims: list[str] = []
-        historical: list[bool] = []
-        for match in matches:
-            kind = (match.group("active_kind") or match.group("passive_kind") or
-                    match.group("generic_kind")).casefold()
-            if kind in {"forecast", "prediction"}:
-                keys, label = ("forecast",), "forecast"
-            elif kind == "forecast outcome":
-                keys, label = ("forecast outcome",), "forecast outcome"
-            elif kind in {"target", "goal"}:
-                keys, label = ("target",), "target"
-            elif kind in {"reported outcome", "actual", "result"}:
-                keys, label = ("reported outcome",), "reported outcome"
-            elif kind == "outcome":
-                keys, label = ("forecast outcome", "reported outcome"), "outcome"
-            else:
-                keys, label = tuple(saved_now), "record"
-            current = any(saved_now[key] for key in keys)
-            previous = any(saved_before[key] for key in keys)
-            historical.append(previous and not current)
-            if not (current or previous):
-                claims.append(label)
-        if claims:
-            unsupported.update(claims)
-        if not matches:
-            kept.append(sentence)
-        elif len(matches) == 1 and historical[0] and not claims:
-            match = matches[0]
-            before = sentence[:match.start()].strip(" ,").casefold()
-            after = sentence[match.end():].strip(" .!?")
-            if before in {"", "yes"} and not after:
-                kept.append(sentence)
-    return " ".join(kept).strip(), unsupported
+    for match in PERSISTENCE_CLAIM.finditer(reply):
+        kind = (match.group("active_kind") or match.group("passive_kind") or
+                match.group("generic_kind")).casefold()
+        if kind in {"forecast", "prediction"}:
+            keys, label = ("forecast",), "forecast"
+        elif kind == "forecast outcome":
+            keys, label = ("forecast outcome",), "forecast outcome"
+        elif kind in {"target", "goal"}:
+            keys, label = ("target",), "target"
+        elif kind in {"reported outcome", "actual", "result"}:
+            keys, label = ("reported outcome",), "reported outcome"
+        elif kind == "outcome":
+            keys, label = ("forecast outcome", "reported outcome"), "outcome"
+        else:
+            keys, label = tuple(saved_now), "record"
+        if not any(saved_now[key] or (allow_previous and saved_before[key]) for key in keys):
+            unsupported.add(label)
+    return unsupported
 
 
 def _deadline_mentioned(text: str, deadline: str) -> bool:
@@ -664,7 +628,9 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
     if not os.environ.get("OPENAI_API_KEY"):
         raise ProviderError("Set OPENAI_API_KEY to chat with OpenAI.")
 
-    history_evidence = retrieve_history(store, starting_branch, text, previous_context, recent_turns)
+    asking_about_history = bool(RECALL_CUE.search(text) or SAVE_HISTORY_QUERY.search(text))
+    history_evidence = (retrieve_history(store, starting_branch, text, previous_context, recent_turns)
+                        if asking_about_history else [])
     records = forecast_records(store, starting_branch)
     available_forecasts = [{"id": item["id"], **item["forecast"]}
                            for item in reversed(records) if item["resolution"] is None]
@@ -740,7 +706,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             jev_assessment = assess_jev(
                 text, context=jev_context,
                 recent_user_messages=recent_user_messages,
-                history_evidence=history_evidence,
+                history_evidence=[],
                 previous_assessment=_last_jev_assessment(store, starting_branch, jev_context))
             jev_guidance = make_jev_guidance(jev_assessment["scores"], jev_context)
             usage.append(_usage("jev", jev_assessment))
@@ -769,8 +735,30 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
     result: dict[str, Any] | None = None
     case: dict[str, Any] | None = None
     validation_error: str | None = None
-    reply = plan.reply.strip()
+    reply = plan.reply
     notices: list[str] = []
+    if not reply.strip():
+        store.commit("note", {"title": "Incomplete turn", "text": text, "jev": jev_assessment},
+                     expected_head=head, expected_branch=starting_branch, usage=usage)
+        raise ProviderError("OpenAI returned an empty conversational reply.")
+    review_evidence = retrieve_history(store, starting_branch, text + " " + reply,
+                                       previous_context, recent_turns, include_recent=True,
+                                       followup_text=text)
+    history_challenge: dict[str, str] | None = None
+    history_review_error: str | None = None
+    if review_evidence:
+        try:
+            review = review_history(reply, review_evidence, user_text=text, model=model)
+            usage.append({**_usage("openai", review), "purpose": "history_review"})
+            if review.conflict:
+                history_challenge = verified_conflict(review.conflict, review_evidence)
+                if history_challenge is None:
+                    notices.append("Pioneer could not verify a proposed history citation.")
+        except ProviderError as exc:
+            history_review_error = str(exc)
+            if exc.usage:
+                usage.append({**exc.usage, "purpose": "history_review"})
+            notices.append("Pioneer's retrospective history check was unavailable for this turn.")
     if decision_requested and plan.case_json:
         try:
             candidate = json.loads(plan.case_json)
@@ -783,18 +771,10 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             result = analyze(candidate)
             case = candidate
             summary = format_analysis(candidate, result)
-            reply = _analysis_framing(reply)
             notices.append(summary)
         except (json.JSONDecodeError, DecisionError) as exc:
             validation_error = str(exc)
-            reply = _validation_reply(validation_error)
-    if not reply and not notices:
-        questions = (plan.context or {}).get("next_questions", [])
-        reply = " ".join(questions) if questions else "What part of this would you like to explore next?"
-    conflict = verified_conflict(plan.history_conflict, history_evidence) if not validation_error else None
-    if conflict:
-        notices.append(f"Earlier you said “{conflict['quote']}” (history {conflict['commit'][:10]}). "
-                       f"{conflict['challenge']}")
+            notices.append(f"Proposed calculation was not verified: {validation_error}")
     stored_forecast: dict[str, Any] | None = None
     if plan.forecast and FORECAST_REQUEST.search(text) and case is None and not validation_error:
         topic = str((plan.context or {}).get("goal", "")).strip()[:120]
@@ -875,23 +855,43 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         deadline = stored_objective["deadline"]
         when = deadline if deadline.casefold().startswith("by ") else f"by {deadline}"
         notices.append(f"Target saved for {stored_objective['metric']}: {target_value} {when}.")
-    asking_about_saved_history = bool(SAVE_HISTORY_QUERY.search(text))
-    reply, unsupported_saves = _remove_unverified_save_claims(reply, {
+    rejected_records = {label for proposed, saved, label in (
+        (plan.forecast, stored_forecast, "forecast"),
+        (plan.resolution, stored_resolution, "forecast outcome"),
+        (plan.objective, stored_objective, "target"),
+        (plan.actual, stored_actual, "reported outcome"))
+        if proposed is not None and saved is None}
+    if rejected_records:
+        notices.append("Pioneer did not save the proposed " +
+                       ", ".join(sorted(rejected_records)) + " record.")
+    saved_now = {
         "forecast": stored_forecast is not None,
         "forecast outcome": stored_resolution is not None,
         "target": stored_objective is not None,
         "reported outcome": stored_actual is not None,
-    }, {
-        "forecast": asking_about_saved_history and bool(records),
-        "forecast outcome": asking_about_saved_history and any(
+    }
+    saved_before = {
+        "forecast": bool(records),
+        "forecast outcome": any(
             item["resolution"] is not None for item in records),
-        "target": asking_about_saved_history and bool(objective_data),
-        "reported outcome": asking_about_saved_history and any(
+        "target": bool(objective_data),
+        "reported outcome": any(
             item["observations"] for item in objective_data),
-    })
+    }
+    save_history_query = bool(SAVE_HISTORY_QUERY.search(text))
+    specific_save_claim = bool(SPECIFIC_SAVE_CUE.search(text + " " + reply)
+                               or NUMBER.search(text) or NUMBER.search(reply))
+    unsupported_saves = _unsupported_save_claims(
+        reply, saved_now, saved_before,
+        allow_previous=save_history_query and not specific_save_claim) - rejected_records
     if unsupported_saves:
         subject = ", ".join(sorted(unsupported_saves))
-        notices.append(f"{subject.capitalize()} not saved; the stated details did not pass Pioneer's checks.")
+        if save_history_query and any(saved_before.get(key, False) for key in unsupported_saves):
+            notices.append(f"OpenAI claimed a save for {subject}. Pioneer found an earlier record "
+                           "of that type, but could not verify it matches this specific claim.")
+        else:
+            notices.append(f"OpenAI claimed a save for {subject}, but Pioneer did not save "
+                           "that record this turn.")
     explore = plan.explore_alternative and previous_context and previous_context.get("status") in {"active", "resolved"}
     payload: dict[str, Any] = {"user": text, "assistant": reply, "provider": "openai", "model": plan.model,
                                "decision_requested": decision_requested}
@@ -907,8 +907,10 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                           "guidance": jev_guidance}
     if jev_error:
         payload["jev_error"] = jev_error
-    if conflict:
-        payload["history_conflict"] = conflict
+    if history_challenge:
+        payload["history_challenge"] = history_challenge
+    if history_review_error:
+        payload["history_review_error"] = history_review_error
     if notices:
         payload["notices"] = notices
     if stored_forecast:
@@ -931,8 +933,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         object_id = store.fork_and_commit(branch_name, "turn", payload, expected_head=head,
                                           expected_branch=starting_branch, usage=usage)
         return TurnOutcome(reply, object_id, plan.model, usage, result, branch_name, starting_branch,
-                           tuple(notices))
+                           tuple(notices), history_challenge)
     object_id = store.commit("turn", payload, expected_head=head,
                              expected_branch=starting_branch, usage=usage)
     return TurnOutcome(reply, object_id, plan.model, usage, result, starting_branch,
-                       notices=tuple(notices))
+                       notices=tuple(notices), history_challenge=history_challenge)
