@@ -86,12 +86,6 @@ _SCORE_NAMES = {
     "reversibility": "hard_to_reverse",
     "information_value": "missing_information",
 }
-_RESPONSE_CUES = {
-    "assumption_tension": "Check for tension with recent user statements or verified older history; cite an older quote only after source verification.",
-    "urgency": "Check whether a real deadline or delay cost changes what can still be learned.",
-    "reversibility": "Identify what could be undone and what commitment would be costly to reverse.",
-    "information_value": "Identify a missing fact that could change the choice and whether it can be learned in time.",
-}
 
 
 def _terms(value: str) -> set[str]:
@@ -203,16 +197,15 @@ def _attention(score: Any) -> str:
 
 
 def make_jev_guidance(scores: dict[str, float], context: dict | None) -> dict[str, Any]:
-    """Turn Jev scores into bounded attention cues for one Pioneer reply.
+    """Summarize Jev scores as bounded attention data for this turn.
 
-    The cues are questions to examine, not findings. In particular, an
-    assumption-tension score never creates a contradiction or citation; those
-    need the conversation plan and the application's source verification.
+    An assumption-tension score does not establish a contradiction or citation;
+    those need the conversation and source verification.
     """
     active_decision = isinstance(context, dict) and context.get("status") in {"active", "resolved"}
     # A lexical router can be fooled by wording such as "which option" in an
     # explanatory question. Jev's low decision-request signal suppresses its
-    # attention cues for a new topic. During an active decision, factual
+    # attention for a new topic. During an active decision, factual
     # followups remain eligible even when they do not ask for a choice again.
     eligible_turn = active_decision or _attention(scores.get("decision_request")) != "background"
     attention = {name: _attention(scores.get(source)) if eligible_turn else "background"
@@ -229,5 +222,4 @@ def make_jev_guidance(scores: dict[str, float], context: dict | None) -> dict[st
     return {
         "attention": attention,
         "priorities": priorities,
-        "response_cues": [_RESPONSE_CUES[name] for name in priorities],
     }

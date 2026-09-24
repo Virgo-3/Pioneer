@@ -6,7 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from pioneer.cli import _chat
+from pioneer.cli import _ask, _chat
 from pioneer.pipeline import TurnOutcome
 from pioneer.state import Store
 
@@ -39,6 +39,33 @@ class ChatTests(unittest.TestCase):
         self.assertNotIn("test-model", output)
         self.assertEqual(errors, "")
         run_turn.assert_called_once_with(self.store, "Should we launch?", model=None)
+
+    @patch("pioneer.cli.run_turn")
+    def test_chat_displays_local_records_after_the_model_reply(self, run_turn):
+        run_turn.return_value = TurnOutcome(
+            "I would try the pilot first.", "a" * 64, "test-model", [], None, "main",
+            notices=("Saved the desired outcome: 100 users by Friday.",
+                     "Current gap from the target: 30 users."))
+        output, errors = self.chat(["What should we do?", "/exit"])
+        lines = output.splitlines()
+        self.assertIn("Pioneer: I would try the pilot first.", lines)
+        self.assertIn("Pioneer record: Saved the desired outcome: 100 users by Friday.", lines)
+        self.assertIn("Pioneer record: Current gap from the target: 30 users.", lines)
+        self.assertLess(lines.index("Pioneer: I would try the pilot first."),
+                        lines.index("Pioneer record: Saved the desired outcome: 100 users by Friday."))
+        self.assertEqual(errors, "")
+
+    @patch("pioneer.cli.run_turn")
+    def test_ask_displays_local_record_separately(self, run_turn):
+        run_turn.return_value = TurnOutcome(
+            "That plan could work if the pilot is cheap.", "a" * 64, "test-model", [],
+            None, "main", notices=("Saved forecast for Friday.",))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _ask(self.store, "Should we pilot?")
+        self.assertEqual(output.getvalue().splitlines(),
+                         ["That plan could work if the pilot is cheap.",
+                          "Pioneer record: Saved forecast for Friday."])
 
     def test_context_and_branch_orientation_follow_saved_history(self):
         self.store.commit("turn", {"user": "Should we launch?", "assistant": "Try a pilot.",

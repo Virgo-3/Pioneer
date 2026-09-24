@@ -113,7 +113,7 @@ class JevContextSelectionTests(unittest.TestCase):
 
 
 class JevGuidanceTests(unittest.TestCase):
-    def test_guidance_prioritizes_tension_and_limits_response_cues(self):
+    def test_guidance_prioritizes_tension_and_limits_priorities(self):
         guidance = make_jev_guidance({
             "decision_request": 0.95,
             "time_sensitive": 0.86,
@@ -128,11 +128,8 @@ class JevGuidanceTests(unittest.TestCase):
             "information_value": "focus",
         })
         self.assertEqual(guidance["priorities"], ["assumption_tension", "urgency"])
-        self.assertEqual(len(guidance["response_cues"]), 2)
-        self.assertIn("verified", guidance["response_cues"][0])
-        self.assertIn("recent user statements", guidance["response_cues"][0])
-        self.assertNotIn("recommendation", guidance)
-        self.assertNotIn("probability", guidance)
+        self.assertEqual(set(guidance), {"attention", "priorities"})
+        self.assertLessEqual(len(guidance["priorities"]), 2)
 
     def test_below_threshold_scores_do_not_force_a_checklist(self):
         guidance = make_jev_guidance({
@@ -141,7 +138,7 @@ class JevGuidanceTests(unittest.TestCase):
             "missing_information": 0.20,
         }, ACTIVE)
         self.assertEqual(guidance["priorities"], [])
-        self.assertEqual(guidance["response_cues"], [])
+        self.assertEqual(set(guidance), {"attention", "priorities"})
         self.assertTrue(all(value == "background" for value in guidance["attention"].values()))
 
     def test_missing_and_malformed_optional_scores_are_neutral(self):
@@ -151,18 +148,17 @@ class JevGuidanceTests(unittest.TestCase):
         self.assertEqual(guidance["priorities"], [])
         self.assertTrue(all(value == "background" for value in guidance["attention"].values()))
 
-    def test_guidance_names_checks_without_asserting_facts(self):
+    def test_guidance_is_attention_data_without_response_instructions(self):
         guidance = make_jev_guidance({
             "time_sensitive": 0.9,
             "hard_to_reverse": 0.85,
             "missing_information": 0.8,
         }, ACTIVE)
         self.assertEqual(guidance["priorities"], ["urgency", "reversibility"])
-        cues = " ".join(guidance["response_cues"])
-        self.assertIn("Check whether", cues)
-        self.assertIn("Identify what", cues)
-        self.assertNotIn("You should", cues)
-        self.assertNotIn("likely to succeed", cues)
+        self.assertEqual(set(guidance), {"attention", "priorities"})
+        self.assertTrue(all(name in guidance["attention"] for name in guidance["priorities"]))
+        self.assertTrue(all(value in {"background", "check", "focus"}
+                            for value in guidance["attention"].values()))
 
     def test_low_decision_request_suppresses_new_topic_guidance(self):
         signals = {"decision_request": 0.2, "time_sensitive": 0.9,

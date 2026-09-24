@@ -10,7 +10,8 @@ from pioneer.history import MAX_EVIDENCE, MAX_RECENT_CHARS, MAX_TOTAL_CHARS, rec
 from pioneer.objectives import objective_records, outcome_report
 from pioneer.pipeline import (_last_jev_assessment, _reported_outcome,
                               _visible_forecast_probability, run_turn)
-from pioneer.providers import ProviderError, TurnPlan, ask_openai, assess_jev, compose_turn, triage_jev
+from pioneer.providers import (SYSTEM_INSTRUCTIONS, TURN_INSTRUCTIONS, ProviderError,
+                               TurnPlan, ask_openai, assess_jev, compose_turn, triage_jev)
 from pioneer.state import Store, StoreError
 
 
@@ -113,6 +114,11 @@ class DecisionTests(unittest.TestCase):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_openai_instructions_do_not_script_disagreement(self):
+        instructions = (SYSTEM_INSTRUCTIONS + "\n" + TURN_INSTRUCTIONS).casefold()
+        self.assertNotIn("do not agree merely to be agreeable", instructions)
+        self.assertNotIn("don't be agreeable", instructions)
+
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
     def test_openai_uses_branch_messages_and_records_usage(self, post):
@@ -326,8 +332,10 @@ class PipelineTests(unittest.TestCase):
                                        "openai-test", 50, 20, "resp_3")
         outcome = run_turn(self.store, text)
         self.assertEqual(outcome.decision["recommendation"]["kind"], "wait")
-        self.assertTrue(outcome.text.startswith("Here is the comparison."))
-        self.assertIn("I would wait", outcome.text)
+        self.assertEqual(outcome.text, "Here is the comparison.")
+        self.assertIn("I would wait", "\n".join(outcome.notices))
+        self.assertEqual(self.store.read_object(outcome.commit)["payload"]["assistant"], outcome.text)
+        self.assertEqual(self.store.read_object(outcome.commit)["payload"]["notices"], list(outcome.notices))
         self.assertEqual(len(self.store.log()), 2)
         self.assertEqual(len(self.store.usage()), 2)
         self.assertEqual({record["commit"] for record in self.store.usage()}, {outcome.commit})
@@ -336,6 +344,15 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("attention", saved_jev["guidance"])
         self.assertEqual(compose.call_args.kwargs["jev_guidance"], saved_jev["guidance"])
 
+        compose.return_value = TurnPlan("The signal is still the deciding factor.", True,
+                                        None, [], "openai-test", 14, 7, "resp_4")
+        run_turn(self.store, "For those available actions, which choice makes sense after the signal?")
+        sent = compose.call_args.args[0]
+        self.assertEqual(sent[-2], {"role": "assistant", "content": "Here is the comparison."})
+        checked = compose.call_args.kwargs["verified_decision"]
+        self.assertTrue(checked)
+        self.assertIn("wait", json.dumps(checked, sort_keys=True))
+
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
     @patch("pioneer.pipeline.compose_turn")
     @patch("pioneer.pipeline.assess_jev")
@@ -343,9 +360,98 @@ class PipelineTests(unittest.TestCase):
         compose.return_value = TurnPlan("Hello.", False, None, [], "test", 8, 3, "r")
         outcome = run_turn(self.store, "Hello, Pioneer.")
         jev.assert_not_called()
+        self.assertEqual(outcome.text, "Hello.")
+        self.assertEqual(outcome.notices, ())
         self.assertEqual(compose.call_args.kwargs["jev_guidance"], None)
         self.assertNotIn("jev", self.store.read_object(outcome.commit)["payload"])
         self.assertEqual(len(self.store.usage()), 1)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_ordinary_recorded_wording_is_not_treated_as_a_persistence_claim(self, compose):
+        reply = "We recorded 80 users on Friday. That gives us a useful baseline."
+        compose.return_value = TurnPlan(reply, False, None, [], "test", 10, 5, "r")
+        outcome = run_turn(self.store, "How would you phrase our customer update?")
+        payload = self.store.read_object(outcome.commit)["payload"]
+        self.assertEqual(outcome.text, reply)
+        self.assertEqual(payload["assistant"], reply)
+        self.assertEqual(outcome.notices, ())
+        self.assertNotIn("notices", payload)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_explicit_recall_recovers_checked_decision_after_neutral_turn(self, compose):
+        case = {"states": {"good": 0.5, "bad": 0.5}, "actions": {
+            "invest": {"outcomes": {"good": 10, "bad": -10}},
+            "hold": {"outcomes": {"good": 0, "bad": 0}}},
+            "wait": {"delay_cost": 1, "information_cost": 0, "signals": {
+                "positive": {"good": 0.9, "bad": 0.1},
+                "negative": {"good": 0.1, "bad": 0.9}}}}
+        case_text = ("Good 50%, bad 50%. Invest pays 10 or -10; hold pays 0. "
+                     "Wait delay costs 1 and information costs 0. A positive signal is 90% "
+                     "likely in good and 10% in bad; a negative signal is 10% in good and 90% in bad.")
+        neutral = {"status": "none", "goal": "", "options": [], "known": [],
+                   "uncertain": [], "provisional_view": "", "next_questions": []}
+        compose.side_effect = [
+            TurnPlan("I can compare those choices.", True, json.dumps(case), [], "test", 10, 5, "r1"),
+            TurnPlan("You're welcome.", False, None, [], "test", 10, 5, "r2", neutral),
+            TurnPlan("The checked comparison favored waiting.", True, None, [], "test", 10, 5, "r3"),
+        ]
+        first = run_turn(self.store, case_text)
+        self.assertEqual(first.decision["recommendation"]["kind"], "wait")
+        neutral_turn = run_turn(self.store, "Thanks.")
+        self.assertEqual(self.store.read_object(neutral_turn.commit)["payload"]["context"]["status"], "none")
+        run_turn(self.store, "What did you recommend?")
+        checked = compose.call_args.kwargs["verified_decision"]
+        self.assertTrue(checked)
+        self.assertIn("I would wait", checked)
+        assistant_history = [item["content"] for item in compose.call_args.args[0]
+                             if item["role"] == "assistant"]
+        self.assertEqual(assistant_history, ["I can compare those choices.", "You're welcome."])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_recall_chooses_named_checked_decision_over_newer_other_topic(self, compose):
+        launch_case = {"title": "Launch timing", "states": {"ready": 1.0}, "actions": {
+            "launch": {"outcomes": {"ready": 8}}, "hold": {"outcomes": {"ready": 0}}}}
+        budget_case = {"title": "Budget allocation", "states": {"available": 1.0}, "actions": {
+            "spend": {"outcomes": {"available": -5}}, "hold": {"outcomes": {"available": 0}}}}
+        launch = run_turn(self.store, json.dumps(launch_case))
+        budget = run_turn(self.store, json.dumps(budget_case))
+        self.assertEqual(launch.decision["recommendation"]["action"], "launch")
+        self.assertEqual(budget.decision["recommendation"]["action"], "hold")
+        neutral = {"status": "none", "goal": "", "options": [], "known": [],
+                   "uncertain": [], "provisional_view": "", "next_questions": []}
+        compose.side_effect = [
+            TurnPlan("You're welcome.", False, None, [], "test", 10, 5, "r1", neutral),
+            TurnPlan("Let me pull up the launch comparison.", True, None, [], "test", 10, 5, "r2"),
+        ]
+        run_turn(self.store, "Thanks.")
+        run_turn(self.store, "What did you recommend for the launch?")
+        checked = compose.call_args.kwargs["verified_decision"]
+        self.assertTrue(checked)
+        self.assertIn("launch has the highest expected payoff", checked)
+        self.assertNotIn("hold has the highest expected payoff", checked)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_local_record_is_not_replayed_as_assistant_speech(self, compose):
+        objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                     "desired": 100, "direction": "at_least", "unit": "users",
+                     "deadline": "Friday", "action": ""}
+        compose.side_effect = [
+            TurnPlan("That is a measurable aim.", False, None, [], "test", 10, 5, "r1",
+                     objective=objective),
+            TurnPlan("We could test demand before committing.", False, None, [],
+                     "test", 10, 5, "r2"),
+        ]
+        first = run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
+        self.assertTrue(first.notices)
+        self.assertEqual(self.store.messages()[-1]["content"], "That is a measurable aim.")
+        run_turn(self.store, "How could we reach it?")
+        sent = compose.call_args.args[0]
+        self.assertEqual(sent[1], {"role": "assistant", "content": "That is a measurable aim."})
+        self.assertNotIn("Target saved", sent[1]["content"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -357,14 +463,18 @@ class PipelineTests(unittest.TestCase):
                                         "test", 10, 5, "r1", objective=objective)
         target = run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
         self.assertEqual(self.store.read_object(target.commit)["payload"]["objective"]["desired"], 100)
-        self.assertIn("track your desired outcome", target.text)
+        self.assertEqual(target.text, "That gives us a clear target.")
+        self.assertIn("Target saved for paid users", "\n".join(target.notices))
+        self.assertEqual(self.store.read_object(target.commit)["payload"]["assistant"], target.text)
+        self.assertEqual(self.store.read_object(target.commit)["payload"]["notices"], list(target.notices))
 
         compose.return_value = TurnPlan("We are making progress.", False, None, [],
                                         "test", 10, 5, "r2",
                                         actual={"objective_id": target.commit, "value": 70,
                                                 "as_of": "today", "note": ""})
         progress = run_turn(self.store, "We have 70 paid users today.")
-        self.assertIn("progress reading", progress.text)
+        self.assertEqual(progress.text, "We are making progress.")
+        self.assertIn("progress reading", "\n".join(progress.notices))
         self.assertEqual(outcome_report(self.store)["progress_count"], 1)
 
         compose.return_value = TurnPlan("Here is the result.", False, None, [],
@@ -372,7 +482,8 @@ class PipelineTests(unittest.TestCase):
                                         actual={"objective_id": target.commit, "value": 80,
                                                 "as_of": "Friday", "note": ""})
         final = run_turn(self.store, "We got 80 paid users by Friday.")
-        self.assertIn("20 users", final.text)
+        self.assertEqual(final.text, "Here is the result.")
+        self.assertIn("20 users", "\n".join(final.notices))
         report = outcome_report(self.store)
         self.assertEqual((report["final_count"], report["missed_count"]), (1, 1))
         self.assertEqual(report["comparisons"][0]["gap"], -20)
@@ -397,7 +508,8 @@ class PipelineTests(unittest.TestCase):
         payload = self.store.read_object(result.commit)["payload"]
         self.assertEqual(payload["actual"]["objective_id"], "$self")
         self.assertEqual(objective_records(self.store)[0]["observations"][0]["objective_id"], result.commit)
-        self.assertIn("30 users", result.text)
+        self.assertEqual(result.text, "That is a useful result to compare.")
+        self.assertIn("30 users", "\n".join(result.notices))
         self.assertEqual(outcome_report(self.store)["missed_count"], 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
@@ -452,6 +564,100 @@ class PipelineTests(unittest.TestCase):
                                                 "as_of": "Jan 31", "note": ""})
         mixed = run_turn(self.store, "We got 70 dollars in revenue and weekly active users are unknown on Jan 31.")
         self.assertNotIn("actual", self.store.read_object(mixed.commit)["payload"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_rejected_target_cannot_leave_false_saved_claim_in_reply(self, compose):
+        objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                     "desired": 100, "direction": "at_least", "unit": "users",
+                     "deadline": "Friday", "action": ""}
+        compose.return_value = TurnPlan("I've saved your target of 100 paid users by Friday.",
+                                        False, None, [], "test", 10, 5, "r", objective=objective)
+        outcome = run_turn(self.store, "I'm considering a launch, but haven't settled on a target.")
+        payload = self.store.read_object(outcome.commit)["payload"]
+        self.assertNotIn("objective", payload)
+        self.assertNotIn("I've saved your target", outcome.text)
+        self.assertIn("not saved", "\n".join(outcome.notices).casefold())
+        self.assertEqual(payload["assistant"], outcome.text)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_unproposed_target_cannot_be_claimed_as_previously_saved(self, compose):
+        compose.return_value = TurnPlan(
+            "I have already saved your target. We can decide timing next.",
+            False, None, [], "test", 10, 5, "r")
+        outcome = run_turn(self.store, "I may launch, but haven't set a target yet.")
+        payload = self.store.read_object(outcome.commit)["payload"]
+        self.assertNotIn("objective", payload)
+        self.assertNotIn("I have already saved your target", outcome.text)
+        self.assertIn("We can decide timing next.", outcome.text)
+        self.assertIn("not saved", "\n".join(outcome.notices).casefold())
+        self.assertEqual(payload["assistant"], outcome.text)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_false_forecast_claim_is_removed_while_real_target_notice_remains(self, compose):
+        objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                     "desired": 100, "direction": "at_least", "unit": "users",
+                     "deadline": "Friday", "action": ""}
+        compose.return_value = TurnPlan(
+            "I saved your forecast of 70% for Friday. The target is clear.",
+            False, None, [], "test", 10, 5, "r", objective=objective)
+        outcome = run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
+        payload = self.store.read_object(outcome.commit)["payload"]
+        self.assertIn("objective", payload)
+        self.assertNotIn("forecast", payload)
+        self.assertNotIn("I saved your forecast", outcome.text)
+        self.assertIn("The target is clear.", outcome.text)
+        records = "\n".join(outcome.notices)
+        self.assertIn("Target saved", records)
+        self.assertIn("Forecast not saved", records)
+        self.assertEqual(payload["notices"], list(outcome.notices))
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_accepted_target_does_not_preserve_conflicting_save_claim(self, compose):
+        objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                     "desired": 100, "direction": "at_least", "unit": "users",
+                     "deadline": "Friday", "action": ""}
+        compose.return_value = TurnPlan(
+            "I saved your target of 200 users Monday. Let's review the path.",
+            False, None, [], "test", 10, 5, "r", objective=objective)
+        outcome = run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
+        payload = self.store.read_object(outcome.commit)["payload"]
+        self.assertEqual(payload["objective"]["desired"], 100)
+        self.assertEqual(payload["objective"]["deadline"], "Friday")
+        self.assertNotIn("I saved your target of 200 users Monday", outcome.text)
+        self.assertIn("Let's review the path.", outcome.text)
+        self.assertEqual(payload["assistant"], outcome.text)
+        records = "\n".join(outcome.notices)
+        self.assertIn("Target saved", records)
+        self.assertIn("100 users", records)
+        self.assertIn("Friday", records)
+        self.assertNotIn("not saved", records.casefold())
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_truthful_confirmation_of_prior_target_is_not_filtered(self, compose):
+        objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                     "desired": 100, "direction": "at_least", "unit": "users",
+                     "deadline": "Friday", "action": ""}
+        reply = "Yes, your target has been saved."
+        compose.side_effect = [
+            TurnPlan("That's a clear target.", False, None, [], "test", 10, 5, "r1",
+                     objective=objective),
+            TurnPlan(reply, False, None, [], "test", 10, 5, "r2"),
+        ]
+        first = run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
+        self.assertIn("objective", self.store.read_object(first.commit)["payload"])
+        confirmed = run_turn(self.store, "Did you save my target?")
+        payload = self.store.read_object(confirmed.commit)["payload"]
+        self.assertEqual(confirmed.text, reply)
+        self.assertEqual(payload["assistant"], reply)
+        self.assertEqual(confirmed.notices, ())
+        self.assertNotIn("notices", payload)
+        self.assertNotIn("objective", payload)
+        self.assertEqual(len(objective_records(self.store)), 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -523,7 +729,8 @@ class PipelineTests(unittest.TestCase):
         saved = self.store.read_object(first.commit)["payload"]["forecast"]
         self.assertEqual((saved["probability"], saved["source"], saved["topic"]),
                          (0.7, "pioneer", "Launch timing"))
-        self.assertIn("track that forecast", first.text)
+        self.assertEqual(first.text, "I estimate a 70% chance we launch by Friday.")
+        self.assertIn("Forecast saved: 70.0%", "\n".join(first.notices))
 
         compose.return_value = TurnPlan("That remains a plan.", False, None, [], "test-model", 10, 5,
                                         "r2", context, resolution={"forecast_id": first.commit,
@@ -827,10 +1034,14 @@ class PipelineTests(unittest.TestCase):
         outcome = run_turn(self.store, "Let's do the public launch before legal review is finished.")
         evidence = compose.call_args.kwargs["history_evidence"]
         self.assertEqual(evidence[0]["commit"], source)
-        self.assertIn("Earlier you said", outcome.text)
-        self.assertIn(source[:10], outcome.text)
-        self.assertIn("Has legal review finished", outcome.text)
-        self.assertEqual(self.store.read_object(outcome.commit)["payload"]["history_conflict"], conflict)
+        self.assertEqual(outcome.text, "Launching now has a condition to resolve.")
+        self.assertIn("Earlier you said", "\n".join(outcome.notices))
+        self.assertIn(source[:10], "\n".join(outcome.notices))
+        self.assertIn("Has legal review finished", "\n".join(outcome.notices))
+        payload = self.store.read_object(outcome.commit)["payload"]
+        self.assertEqual(payload["assistant"], outcome.text)
+        self.assertEqual(payload["notices"], list(outcome.notices))
+        self.assertEqual(payload["history_conflict"], conflict)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
@@ -844,6 +1055,7 @@ class PipelineTests(unittest.TestCase):
                                          "challenge": "Why did you change your mind?"})
         outcome = run_turn(self.store, "Launch before legal review?")
         self.assertEqual(outcome.text, "Let's examine it.")
+        self.assertEqual(outcome.notices, ())
         self.assertNotIn("history_conflict", self.store.read_object(outcome.commit)["payload"])
 
     def test_retrieval_is_bounded_and_stays_on_active_branch(self):

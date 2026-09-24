@@ -28,6 +28,38 @@ CONCLUSION_WORD = re.compile(
     r"\b(recommend\w*|should|would|better|best|prefer\w*|highest|lowest|payoff|expected|wait|waiting|act|choose)\b",
     re.IGNORECASE,
 )
+PERSISTENCE_CLAIM = re.compile(
+    r"\b(?:(?:i|we|pioneer)(?:['’]ve| have)?\s+"
+    r"(?:(?:already|just|now)\s+)?(?:saved|logged|stored|tracked|recorded|marked)\s+"
+    r"(?:(?:your|the|this|that|a|an)\s+)?"
+    r"(?P<active_kind>forecast outcome|reported outcome|forecast|prediction|target|goal|"
+    r"actual|result|outcome|record)\b|"
+    r"(?:your|the|this)\s+"
+    r"(?P<passive_kind>forecast outcome|reported outcome|forecast|prediction|target|goal|"
+    r"actual|result|outcome|record)\s+(?:has been|was|is)\s+"
+    r"(?:(?:already|just|now)\s+)?(?:saved|logged|stored|tracked|recorded|marked)\b|"
+    r"(?:i|we|pioneer)(?:['’]ve| have)?\s+(?:(?:already|just|now)\s+)?"
+    r"(?:saved|logged|stored)\s+(?P<generic_kind>it|that|this|one)\b)",
+    re.IGNORECASE,
+)
+DECISION_RECALL = re.compile(
+    r"\b(?:what did (?:you|we) (?:recommend|decide|choose|calculate)|"
+    r"what was (?:your|our|the) (?:recommendation|decision|analysis|calculation)|"
+    r"why did (?:you|we) (?:recommend|choose|decide|wait|act|pick|prefer)|"
+    r"(?:remind me|recap|repeat|explain).{0,60}(?:decision|recommendation|analysis|calculation))\b",
+    re.IGNORECASE,
+)
+DECISION_RECALL_TOPIC = re.compile(
+    r"\b(?:for|about|regarding|on)\s+(?:the|my|our|that|this)?\s*([^?.!,;]{2,80})",
+    re.IGNORECASE,
+)
+RECALL_GENERIC_TERMS = {"acti", "case", "choi", "comp", "deci", "opti", "plan", "resu"}
+SAVE_HISTORY_QUERY = re.compile(
+    r"\b(?:did (?:you|we|pioneer)|have (?:you|we)|was|is|do (?:you|we)|"
+    r"are (?:you|we))\b.{0,50}\b(?:save|saved|record|recorded|track|tracked|"
+    r"log|logged|store|stored)\b",
+    re.IGNORECASE,
+)
 FORECAST_REQUEST = re.compile(
     r"\b(?:how likely|how confident|what(?:'s| is| are) (?:the )?(?:chances?|odds|probability)|"
     r"(?:give|make) (?:me )?(?:your |a )?(?:forecast|probability estimate|odds)|"
@@ -80,6 +112,7 @@ class TurnOutcome:
     decision: dict[str, Any] | None
     branch: str
     branched_from: str | None = None
+    notices: tuple[str, ...] = ()
 
 
 def _usage(provider: str, result: Any) -> dict[str, Any]:
@@ -196,6 +229,41 @@ def _last_context(store: Store, branch: str) -> dict[str, Any] | None:
     return None
 
 
+def _recent_verified_decision(store: Store, branch: str,
+                              context: dict[str, Any] | None, text: str) -> str | None:
+    """Carry the latest checked result as data without rewriting model history."""
+    active = isinstance(context, dict) and context.get("status") in {"active", "resolved"}
+    recalling = bool(DECISION_RECALL.search(text))
+    if not active and not recalling:
+        return None
+    goal = context.get("goal") if active else None
+    topic_match = DECISION_RECALL_TOPIC.search(text) if recalling else None
+    topic_terms = (_salient_terms(topic_match.group(1)) - RECALL_GENERIC_TERMS
+                   if topic_match else set())
+    best: tuple[tuple[int, int], str] | None = None
+    for _, obj in store.log(branch):
+        if obj["kind"] != "turn":
+            continue
+        payload = obj["payload"]
+        turn_context = payload.get("context")
+        if active and not recalling and isinstance(turn_context, dict) and turn_context.get("goal") != goal:
+            return None
+        decision = payload.get("decision")
+        if isinstance(decision, dict) and isinstance(decision.get("case"), dict) \
+                and isinstance(decision.get("analysis"), dict):
+            summary = format_analysis(decision["case"], decision["analysis"])[:2000]
+            if not topic_terms:
+                return summary
+            case_title = str(decision["case"].get("title", ""))
+            context_goal = str(turn_context.get("goal", "")) if isinstance(turn_context, dict) else ""
+            strong = len(topic_terms & _salient_terms(case_title + " " + context_goal))
+            weak = len(topic_terms & _salient_terms(str(payload.get("user", ""))))
+            score = (strong, weak)
+            if score > (0, 0) and (best is None or score > best[0]):
+                best = (score, summary)
+    return best[1] if best else None
+
+
 def _last_jev_assessment(store: Store, branch: str, context: dict[str, Any] | None) -> dict[str, Any] | None:
     """Carry decision attention only within the same active branch goal."""
     if not context or context.get("status") not in {"active", "resolved"}:
@@ -271,6 +339,49 @@ def _analysis_framing(reply: str) -> str:
     if len(framing) > 180 or NUMBER.search(framing) or CONCLUSION_WORD.search(framing):
         return ""
     return framing
+
+
+def _remove_unverified_save_claims(reply: str, saved_now: dict[str, bool],
+                                   saved_before: dict[str, bool]) -> tuple[str, set[str]]:
+    """Keep bare, true history answers; use receipts for new saves and details."""
+    sentences = re.split(r"(?<=[.!?])\s+", reply.strip())
+    kept: list[str] = []
+    unsupported: set[str] = set()
+    for sentence in sentences:
+        matches = list(PERSISTENCE_CLAIM.finditer(sentence))
+        claims: list[str] = []
+        historical: list[bool] = []
+        for match in matches:
+            kind = (match.group("active_kind") or match.group("passive_kind") or
+                    match.group("generic_kind")).casefold()
+            if kind in {"forecast", "prediction"}:
+                keys, label = ("forecast",), "forecast"
+            elif kind == "forecast outcome":
+                keys, label = ("forecast outcome",), "forecast outcome"
+            elif kind in {"target", "goal"}:
+                keys, label = ("target",), "target"
+            elif kind in {"reported outcome", "actual", "result"}:
+                keys, label = ("reported outcome",), "reported outcome"
+            elif kind == "outcome":
+                keys, label = ("forecast outcome", "reported outcome"), "outcome"
+            else:
+                keys, label = tuple(saved_now), "record"
+            current = any(saved_now[key] for key in keys)
+            previous = any(saved_before[key] for key in keys)
+            historical.append(previous and not current)
+            if not (current or previous):
+                claims.append(label)
+        if claims:
+            unsupported.update(claims)
+        if not matches:
+            kept.append(sentence)
+        elif len(matches) == 1 and historical[0] and not claims:
+            match = matches[0]
+            before = sentence[:match.start()].strip(" ,").casefold()
+            after = sentence[match.end():].strip(" .!?")
+            if before in {"", "yes"} and not after:
+                kept.append(sentence)
+    return " ".join(kept).strip(), unsupported
 
 
 def _deadline_mentioned(text: str, deadline: str) -> bool:
@@ -643,7 +754,9 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                             recent_resolutions=resolved_context, calibration=calibration_evidence,
                             open_objectives=objective_context,
                             recent_objectives=recent_objective_context,
-                            outcome_history=outcome_evidence)
+                            outcome_history=outcome_evidence,
+                            verified_decision=_recent_verified_decision(
+                                store, starting_branch, previous_context, text))
     except ProviderError as exc:
         if exc.usage:
             usage.append(exc.usage)
@@ -657,6 +770,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
     case: dict[str, Any] | None = None
     validation_error: str | None = None
     reply = plan.reply.strip()
+    notices: list[str] = []
     if decision_requested and plan.case_json:
         try:
             candidate = json.loads(plan.case_json)
@@ -669,18 +783,18 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             result = analyze(candidate)
             case = candidate
             summary = format_analysis(candidate, result)
-            framing = _analysis_framing(reply)
-            reply = f"{framing} {summary}" if framing else summary
+            reply = _analysis_framing(reply)
+            notices.append(summary)
         except (json.JSONDecodeError, DecisionError) as exc:
             validation_error = str(exc)
             reply = _validation_reply(validation_error)
-    if not reply:
+    if not reply and not notices:
         questions = (plan.context or {}).get("next_questions", [])
         reply = " ".join(questions) if questions else "What part of this would you like to explore next?"
     conflict = verified_conflict(plan.history_conflict, history_evidence) if not validation_error else None
     if conflict:
-        reply += (f"\n\nEarlier you said “{conflict['quote']}” (history {conflict['commit'][:10]}). "
-                  f"{conflict['challenge']}")
+        notices.append(f"Earlier you said “{conflict['quote']}” (history {conflict['commit'][:10]}). "
+                       f"{conflict['challenge']}")
     stored_forecast: dict[str, Any] | None = None
     if plan.forecast and FORECAST_REQUEST.search(text) and case is None and not validation_error:
         topic = str((plan.context or {}).get("goal", "")).strip()[:120]
@@ -692,8 +806,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                     and _event_mentioned(user_evidence, candidate["event"], candidate["deadline"])
                     and _visible_forecast_probability(reply, candidate)):
                 stored_forecast = candidate
-                if not re.search(r"\b(?:track|record|sav)(?:ed|ing)?\b", reply, re.IGNORECASE):
-                    reply += "\n\nI'll track that forecast so we can score it when the outcome is known."
+                notices.append(f"Forecast saved: {candidate['probability']:.1%} — "
+                               f"{candidate['event']}. Resolution: {candidate['deadline']}.")
         except CalibrationError:
             pass
     stored_resolution: dict[str, Any] | None = None
@@ -708,9 +822,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                 and _reported_outcome(text, target) is plan.resolution["outcome"]):
             stored_resolution = {"forecast_id": forecast_id, "outcome": plan.resolution["outcome"],
                                  "note": text.strip()[:1000]}
-            if not re.search(r"\b(?:record|mark|sav)(?:ed|ing)?\b", reply, re.IGNORECASE):
-                action = "corrected" if correction else "recorded"
-                reply += f"\n\nI've {action} the reported outcome for forecast {forecast_id[:12]}."
+            action = "corrected" if correction else "recorded"
+            notices.append(f"Forecast outcome {action} for {forecast_id[:12]}.")
     stored_objective: dict[str, Any] | None = None
     if plan.objective and case is None and not validation_error:
         try:
@@ -752,7 +865,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                 except ObjectiveError:
                     pass
     if stored_actual:
-        reply += "\n\n" + comparison_text
+        notices.append(comparison_text)
     elif stored_objective:
         if stored_objective["kind"] == "numeric":
             target_value = (f"{stored_objective['direction'].replace('_', ' ')} "
@@ -761,8 +874,24 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             target_value = "yes" if stored_objective["desired"] else "no"
         deadline = stored_objective["deadline"]
         when = deadline if deadline.casefold().startswith("by ") else f"by {deadline}"
-        reply += (f"\n\nI'll track your desired outcome for {stored_objective['metric']}: "
-                  f"{target_value} {when}.")
+        notices.append(f"Target saved for {stored_objective['metric']}: {target_value} {when}.")
+    asking_about_saved_history = bool(SAVE_HISTORY_QUERY.search(text))
+    reply, unsupported_saves = _remove_unverified_save_claims(reply, {
+        "forecast": stored_forecast is not None,
+        "forecast outcome": stored_resolution is not None,
+        "target": stored_objective is not None,
+        "reported outcome": stored_actual is not None,
+    }, {
+        "forecast": asking_about_saved_history and bool(records),
+        "forecast outcome": asking_about_saved_history and any(
+            item["resolution"] is not None for item in records),
+        "target": asking_about_saved_history and bool(objective_data),
+        "reported outcome": asking_about_saved_history and any(
+            item["observations"] for item in objective_data),
+    })
+    if unsupported_saves:
+        subject = ", ".join(sorted(unsupported_saves))
+        notices.append(f"{subject.capitalize()} not saved; the stated details did not pass Pioneer's checks.")
     explore = plan.explore_alternative and previous_context and previous_context.get("status") in {"active", "resolved"}
     payload: dict[str, Any] = {"user": text, "assistant": reply, "provider": "openai", "model": plan.model,
                                "decision_requested": decision_requested}
@@ -780,6 +909,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         payload["jev_error"] = jev_error
     if conflict:
         payload["history_conflict"] = conflict
+    if notices:
+        payload["notices"] = notices
     if stored_forecast:
         payload["forecast"] = stored_forecast
     if stored_resolution:
@@ -799,7 +930,9 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         branch_name = _branch_name(text)
         object_id = store.fork_and_commit(branch_name, "turn", payload, expected_head=head,
                                           expected_branch=starting_branch, usage=usage)
-        return TurnOutcome(reply, object_id, plan.model, usage, result, branch_name, starting_branch)
+        return TurnOutcome(reply, object_id, plan.model, usage, result, branch_name, starting_branch,
+                           tuple(notices))
     object_id = store.commit("turn", payload, expected_head=head,
                              expected_branch=starting_branch, usage=usage)
-    return TurnOutcome(reply, object_id, plan.model, usage, result, starting_branch)
+    return TurnOutcome(reply, object_id, plan.model, usage, result, starting_branch,
+                       notices=tuple(notices))

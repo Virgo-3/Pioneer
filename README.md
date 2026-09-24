@@ -2,7 +2,9 @@
 
 **A branchable conversational AI terminal for reasoning through decisions — without losing the paths you didn't take.**
 
-Pioneer pairs conversational AI with Git-like conversation history and an explicit decision-analysis engine. Fork a conversation to explore an alternative, weigh acting now against waiting for more information, model what's reversible, track API spend, and verify that your local history hasn't been tampered with.
+Pioneer pairs OpenAI's conversational answer with Git-like conversation history and an explicit decision-analysis engine. Fork a conversation to explore an alternative, weigh acting now against waiting for more information, model what's reversible, track API spend, and verify that your local history hasn't been tampered with.
+
+OpenAI writes the conversational reply. Pioneer supplies relevant branch context and checks structured claims before saving them. When it records a target, reported result, forecast, cited history challenge, or calculation, the terminal shows a separate **Pioneer record:** line. The record shows what Pioneer saved, calculated, or traced to a source; it is not appended to OpenAI's spoken reply or replayed later as assistant speech. A valid numerical case may have a short conversational reply followed by a checked calculation in a record. If a proposed calculation fails validation, or the reply falsely claims an unsaved record was saved, Pioneer gives a safe correction instead of presenting the unsupported claim.
 
 > Pioneer stores its own content-addressed history in `.pioneer/`. It does not depend on Git.
 
@@ -29,8 +31,9 @@ Most AI chat tools give you one linear thread and no way to compare options side
 - **Content-addressed history** — SHA-256-hashed objects, checkable for corruption or tampering
 - **Usage ledger** — track OpenAI/Jev token usage, with optional cost estimation
 - **Local decision engine** — analyze structured decision cases with no API call at all
+- **Natural conversation with checked records** — keep the OpenAI answer intact while displaying locally verified facts separately
 
-For conversation, Pioneer sends up to the latest 20 complete turns, capped at 24,000 characters of prior messages, plus its compact working context to OpenAI. It searches older user turns on the active branch and includes up to five relevant quotations in the same request. When asked to recall earlier history, it can also retrieve old turns without a topic keyword. If the model identifies a material conflict, Pioneer checks that the quoted text and commit really exist in the retrieved history before showing the challenge. Omitted or older quotations do not supply numbers to the decision engine. The search uses word overlap, so it can miss a relevant statement phrased differently; the model can also misjudge whether a change of view is a conflict.
+For conversation, Pioneer sends up to the latest 20 complete turns, capped at 24,000 characters of prior messages, plus its compact working context to OpenAI. It searches older user turns on the active branch and includes up to five relevant quotations in the same request. When asked to recall earlier history, it can also retrieve old turns without a topic keyword. If the model identifies a material conflict, Pioneer checks that the quoted text and commit really exist in the retrieved history before showing a separate, cited challenge. Omitted or older quotations do not supply numbers to the decision engine. The search uses word overlap, so it can miss a relevant statement phrased differently; the model can also misjudge whether a change of view is a conflict.
 
 ## Requirements
 
@@ -98,7 +101,7 @@ On main | new conversation
 You: I'm deciding whether to launch now or run a smaller pilot first.
 ```
 
-Every turn is saved into `.pioneer/`.
+Every turn is saved into `.pioneer/`. The saved `assistant` field contains the conversational reply; local verification receipts, when present, are saved in `notices`.
 
 For a single non-interactive turn:
 
@@ -274,7 +277,7 @@ If a calculation is missing a material assumption, Pioneer returns to the conver
 
 Set `TYPESAFE_API_KEY` to let Pioneer consult Jev when its local routing detects a decision or a substantive follow-up to one. Ordinary chat does not require a Jev call. The routing is deliberately conservative, so it can miss an implicit decision; Pioneer still uses its normal conversational decision guidance in that case.
 
-Jev sees the current message, recent user messages, the active branch's working decision context when the topic continues, a few relevant older user statements, and the previous Jev assessment for that goal. It answers narrow [typed yes/no questions](https://api.typesafe.ai/docs) about whether a choice is in play, whether timing and reversal matter, whether a missing fact could change the choice, and whether prior user statements suggest an assumption to check. Pioneer turns the results into at most two attention cues for OpenAI's single natural reply and saves the assessment with the turn. `/context` shows those decision checks without displaying raw scores.
+Jev sees the current message, recent user messages, the active branch's working decision context when the topic continues, a few relevant older user statements, and the previous Jev assessment for that goal. It answers narrow [typed yes/no questions](https://api.typesafe.ai/docs) about whether a choice is in play, whether timing and reversal matter, whether a missing fact could change the choice, and whether prior user statements suggest an assumption to check. Pioneer passes at most two relevant attention priorities as data for OpenAI's reply and saves the assessment with the turn. `/context` shows those decision checks without displaying raw scores.
 
 Jev's values are judgments about the situation described, not outcome probabilities or action recommendations. They never enter the numerical decision case. If Jev is unavailable, Pioneer continues with OpenAI; conversation and local decision analysis also work without a Jev key.
 

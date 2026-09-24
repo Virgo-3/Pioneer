@@ -159,7 +159,10 @@ def _ask(store: Store, text: str, model: str | None = None, *, interactive: bool
     outcome = run_turn(store, text, model=model)
     if outcome.branched_from:
         print(f"Exploring on {outcome.branch}. Your conversation on {outcome.branched_from} is still there.")
-    print(f"Pioneer: {outcome.text}" if interactive else outcome.text)
+    if outcome.text:
+        print(f"Pioneer: {outcome.text}" if interactive else outcome.text)
+    for notice in outcome.notices:
+        print(f"Pioneer record: {notice}")
 
 
 def _triage(store: Store, text: str) -> None:
