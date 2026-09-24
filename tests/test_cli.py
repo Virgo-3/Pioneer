@@ -115,9 +115,19 @@ class ChatTests(unittest.TestCase):
         self.assertIn("Use /switch NAME", errors)
         self.assertIn("Use /decide FILE", errors)
         self.assertEqual(errors.count("Unknown command"), 3)
-        self.assertIn("/context", output)
+        self.assertIn("/branches", output)
+        self.assertNotIn("/context", output)
         self.assertNotIn("/status", output)
         self.assertNotIn("/triage", output)
+
+    def test_advanced_help_keeps_exact_controls_available(self):
+        output, errors = self.chat(["/help advanced", "/help other", "/exit"])
+        self.assertIn("/context", output)
+        self.assertIn("/target GOAL", output)
+        self.assertIn("/forecast P", output)
+        self.assertIn("/decide FILE", output)
+        self.assertIn("/model MODEL", output)
+        self.assertIn("Use /help or /help advanced.", errors)
 
     def test_quoted_decision_path_and_analysis_command(self):
         case = {"title": "Test choice", "states": {"yes": 1},

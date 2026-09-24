@@ -148,19 +148,26 @@ To start over on `main`, type `/reset main` in chat or run `pioneer reset main`.
 
 ## Interactive commands
 
-Inside `pioneer chat`, type `/help` to see these:
+Inside `pioneer chat`, type `/help` for the everyday controls. Describe goals, forecasts, and results in conversation; Pioneer confirms a saved item with a `Pioneer record` line.
 
 | Command | Description |
 | --- | --- |
-| `/context` | Show the saved working context |
 | `/branches` | List conversations and their topics |
 | `/branch NAME` | Copy the current conversation to a new branch |
 | `/switch NAME` | Continue on another branch |
 | `/clear` | Clear the terminal display without changing history |
 | `/reset [BRANCH]` | Restart `main` or a named branch; preserve old history on a recovery branch |
 | `/log` | Show recent saved turns |
-| `/analysis` | Show the latest complete decision calculation |
 | `/usage` | Show recorded API token usage |
+| `/help advanced` | Show exact record, calculation, and session controls |
+| `/exit` | Leave the interactive terminal |
+
+Type `/help advanced` for the following commands. They remain available when you need an exact record or want to inspect the saved state; conversational saves depend on the information supplied and passing validation.
+
+| Command | Description |
+| --- | --- |
+| `/context` | Show the saved working context |
+| `/analysis` | Show the latest complete decision calculation |
 | `/target GOAL \| METRIC \| DESIRED \| WHEN [\| DIRECTION \| UNIT \| ACTION]` | Save a desired outcome; `DESIRED` is a number or yes/no |
 | `/targets` | List desired outcomes and their current status |
 | `/observe ID \| ACTUAL \| WHEN [\| NOTE]` | Report an actual result or correct an earlier report |
@@ -171,7 +178,6 @@ Inside `pioneer chat`, type `/help` to see these:
 | `/forecast-accuracy [pioneer\|user\|all]` | Score probability forecasts against reported events |
 | `/decide FILE` | Analyze a structured decision case |
 | `/model MODEL` | Change the OpenAI model for this session |
-| `/exit` | Leave the interactive terminal |
 
 ## Decision analysis
 
