@@ -283,17 +283,21 @@ class Store:
 
     def verify(self) -> dict[str, int]:
         self.require()
+        current = self.current_branch()
+        branches = self.branches()
+        if current not in branches:
+            raise StoreError(f"Current branch is missing: {current}")
         objects: set[str] = set()
         for path in (self.data / "objects").glob("*.json"):
             self.read_object(path.stem)
             objects.add(path.stem)
-        for name in self.branches():
+        for name in branches:
             self.log(name)
         entries = self.usage()
         for entry in entries:
             if "commit" in entry and entry["commit"] not in objects:
                 raise StoreError(f"Usage ledger references missing commit: {entry['commit']}")
-        return {"objects": len(objects), "branches": len(self.branches()), "usage_entries": len(entries)}
+        return {"objects": len(objects), "branches": len(branches), "usage_entries": len(entries)}
 
 
 def _now() -> str:

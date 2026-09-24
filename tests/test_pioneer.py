@@ -46,6 +46,11 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.usage()), 2)
         self.assertEqual(self.store.verify()["usage_entries"], 2)
 
+    def test_verify_rejects_missing_current_branch(self):
+        (self.store.data / "refs" / "main").unlink()
+        with self.assertRaisesRegex(StoreError, "Current branch is missing: main"):
+            self.store.verify()
+
     def test_reset_main_preserves_history_on_rescue_branch(self):
         first = self.store.commit("turn", {"user": "old question", "assistant": "old answer"},
                                   usage={"provider": "openai", "model": "test", "input_tokens": 3,
