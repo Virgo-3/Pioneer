@@ -605,7 +605,6 @@ def _chat(store: Store, model: str | None) -> None:
                 return
             if command == "/help" and not argument:
                 print("Type a message to continue the conversation. Commands:")
-                print("  /status                 Show the current branch and topic")
                 print("  /context                Show the saved working context")
                 print("  /branches               List conversations and their topics")
                 print("  /branch NAME            Copy this conversation to a new branch")
@@ -625,7 +624,6 @@ def _chat(store: Store, model: str | None) -> None:
                 print("  /resolve ID yes|no      Report whether a predicted event happened")
                 print("  /forecast-accuracy [SOURCE]  Score probability estimates")
                 print("  /decide FILE            Calculate a decision from JSON")
-                print("  /triage ACTION          Ask Jev to assess an action")
                 print("  /model MODEL            Select a model for this session")
                 print("  /exit                   Leave the chat")
             elif command == "/model":
@@ -660,14 +658,6 @@ def _chat(store: Store, model: str | None) -> None:
                     payload = obj["payload"]
                     title = payload.get("user") or payload.get("title") or payload.get("text") or obj["kind"]
                     print(f"{object_id[:12]}  {obj['kind']:<8}  {_brief(title, 72)}")
-            elif command == "/status" and not argument:
-                print(f"{store.current_branch()} @ {store.resolve()[:12]}  ({len(store.log()) - 1} saved entries)")
-                topic = _topic(store)
-                if topic:
-                    print(f"Topic: {topic}")
-                context = _latest_context(store)
-                if context and context.get("provisional_view"):
-                    print(f"Current view: {_brief(context['provisional_view'])}")
             elif command == "/context" and not argument:
                 _print_context(store)
             elif command == "/usage" and not argument:
@@ -704,10 +694,6 @@ def _chat(store: Store, model: str | None) -> None:
                     print("No calculated decision on this branch yet.")
             elif command == "/decide":
                 _decide(store, _file_argument(argument))
-            elif command == "/triage":
-                if not argument.strip():
-                    raise StoreError("Use /triage ACTION.")
-                _triage(store, argument)
             elif command.startswith("/"):
                 print("Unknown command or extra argument. Type /help for commands.", file=sys.stderr)
             else:

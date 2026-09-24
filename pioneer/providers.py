@@ -339,7 +339,7 @@ def _valid_actual(value: Any) -> bool:
 
 def triage_jev(text: str, *, model: str | None = None,
                context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Standalone `/triage` diagnostic, separate from conversational Jev guidance."""
+    """Standalone triage diagnostic, separate from conversational Jev guidance."""
     return _ask_jev({"message": text, "current_decision": context or {}}, {
         "decision_request": {"type": "noul", "instructions": "Is the user asking to choose an action or decide whether to act now or wait?"},
         "time_sensitive": {"type": "noul", "instructions": "Does the proposed action have a stated near-term deadline or a clear cost of delaying it?"},

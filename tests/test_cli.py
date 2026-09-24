@@ -75,9 +75,9 @@ class ChatTests(unittest.TestCase):
                                                "uncertain": ["Pilot duration"],
                                                "provisional_view": "Pilot first",
                                                "next_questions": ["How long would a pilot take?"]}})
-        output, errors = self.chat(["/status", "/context", "/branch alternate",
+        output, errors = self.chat(["/context", "/branch alternate",
                                     "/branches", "/switch alternate", "/exit"])
-        self.assertIn("Topic: Launch timing", output)
+        self.assertIn("Goal: Launch timing", output)
         self.assertIn("Current view: Pilot first", output)
         self.assertIn("Still uncertain:\n    - Pilot duration", output)
         self.assertIn("Type /switch alternate to continue there", output)
@@ -110,13 +110,14 @@ class ChatTests(unittest.TestCase):
 
     def test_command_errors_are_actionable_and_do_not_leave_chat(self):
         output, errors = self.chat(["/branch", "/switch two words", "/decide",
-                                    "/triage", "/unknown", "/help", "/exit"])
+                                    "/status", "/triage launch", "/unknown", "/help", "/exit"])
         self.assertIn("Use /branch NAME", errors)
         self.assertIn("Use /switch NAME", errors)
         self.assertIn("Use /decide FILE", errors)
-        self.assertIn("Use /triage ACTION", errors)
-        self.assertIn("Unknown command", errors)
+        self.assertEqual(errors.count("Unknown command"), 3)
         self.assertIn("/context", output)
+        self.assertNotIn("/status", output)
+        self.assertNotIn("/triage", output)
 
     def test_quoted_decision_path_and_analysis_command(self):
         case = {"title": "Test choice", "states": {"yes": 1},
@@ -131,7 +132,7 @@ class ChatTests(unittest.TestCase):
 
     def test_clear_and_reset_main_restart_chat_without_losing_history(self):
         old_tip = self.store.commit("turn", {"user": "old goal", "assistant": "old reply"})
-        output, errors = self.chat(["/clear", "/reset main", "/status", "/exit"])
+        output, errors = self.chat(["/clear", "/reset main", "/exit"])
         self.assertIn("Started a fresh conversation on main", output)
         self.assertIn("On main | new conversation", output)
         self.assertEqual(self.store.resolve(), self.store.log()[-1][0])

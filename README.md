@@ -152,7 +152,6 @@ Inside `pioneer chat`, type `/help` to see these:
 
 | Command | Description |
 | --- | --- |
-| `/status` | Show the current branch and topic |
 | `/context` | Show the saved working context |
 | `/branches` | List conversations and their topics |
 | `/branch NAME` | Copy the current conversation to a new branch |
@@ -171,7 +170,6 @@ Inside `pioneer chat`, type `/help` to see these:
 | `/resolve ID yes\|no` | Report whether an event happened, or correct an earlier report |
 | `/forecast-accuracy [pioneer\|user\|all]` | Score probability forecasts against reported events |
 | `/decide FILE` | Analyze a structured decision case |
-| `/triage ACTION` | Ask Jev to assess an action |
 | `/model MODEL` | Change the OpenAI model for this session |
 | `/exit` | Leave the interactive terminal |
 
