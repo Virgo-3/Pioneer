@@ -7,6 +7,7 @@ from unittest.mock import patch
 from pioneer.calibration import add_forecast, calibration_report, forecast_records, resolve_forecast
 from pioneer.decision import DecisionError, analyze
 from pioneer.history import MAX_EVIDENCE, MAX_RECENT_CHARS, MAX_TOTAL_CHARS, recent_messages, retrieve_history
+from pioneer.objectives import objective_records, outcome_report
 from pioneer.pipeline import (_last_jev_assessment, _reported_outcome,
                               _visible_forecast_probability, run_turn)
 from pioneer.providers import ProviderError, TurnPlan, ask_openai, assess_jev, compose_turn, triage_jev
@@ -213,11 +214,40 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(plan.forecast, forecast)
         self.assertIsNone(plan.resolution)
         self.assertIn("forecast", post.call_args.args[2]["text"]["format"]["schema"]["required"])
-        self.assertIn("calibration_history", post.call_args.args[2]["input"][-2]["content"])
+        self.assertIn("forecast_accuracy_history", post.call_args.args[2]["input"][-2]["content"])
         response["forecast"]["probability"] = 1.5
         post.return_value["output"][0]["content"][0]["text"] = json.dumps(response)
         with self.assertRaises(ProviderError):
             compose_turn([{"role": "user", "content": "What are the chances?"}])
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
+    @patch("pioneer.providers._post")
+    def test_structured_desired_and_actual_outcomes(self, post):
+        context = {"status": "none", "goal": "", "options": [], "known": [],
+                   "uncertain": [], "provisional_view": "", "next_questions": []}
+        objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                     "desired": 100, "direction": "at_least", "unit": "users",
+                     "deadline": "Friday", "action": ""}
+        actual = {"objective_id": "", "value": 70, "as_of": "Friday", "note": ""}
+        response = {"reply": "Let's compare the result with your goal.",
+                    "decision_requested": False, "case_json": None, "missing": [],
+                    "context": context, "explore_alternative": False,
+                    "history_conflict": None, "forecast": None, "resolution": None,
+                    "objective": objective, "actual": actual}
+        post.return_value = {"model": "test", "output": [{"content": [
+            {"type": "output_text", "text": json.dumps(response)}]}]}
+        plan = compose_turn([{"role": "user", "content": "We wanted 100 users; got 70."}],
+                            outcome_history={"final_count": 2})
+        self.assertEqual(plan.objective, objective)
+        self.assertEqual(plan.actual, actual)
+        schema = post.call_args.args[2]["text"]["format"]["schema"]
+        self.assertIn("objective", schema["required"])
+        self.assertIn("actual", schema["required"])
+        self.assertIn("outcome_history", post.call_args.args[2]["input"][-2]["content"])
+        response["actual"]["value"] = float("inf")
+        post.return_value["output"][0]["content"][0]["text"] = json.dumps(response)
+        with self.assertRaises(ProviderError):
+            compose_turn([{"role": "user", "content": "We got an impossible number."}])
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
@@ -314,6 +344,169 @@ class PipelineTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
     @patch("pioneer.pipeline.compose_turn")
+    def test_conversation_compares_target_progress_and_final_result(self, compose):
+        objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                     "desired": 100, "direction": "at_least", "unit": "users",
+                     "deadline": "Friday", "action": ""}
+        compose.return_value = TurnPlan("That gives us a clear target.", False, None, [],
+                                        "test", 10, 5, "r1", objective=objective)
+        target = run_turn(self.store, "Our goal is at least 100 paid users by Friday.")
+        self.assertEqual(self.store.read_object(target.commit)["payload"]["objective"]["desired"], 100)
+        self.assertIn("track your desired outcome", target.text)
+
+        compose.return_value = TurnPlan("We are making progress.", False, None, [],
+                                        "test", 10, 5, "r2",
+                                        actual={"objective_id": target.commit, "value": 70,
+                                                "as_of": "today", "note": ""})
+        progress = run_turn(self.store, "We have 70 paid users today.")
+        self.assertIn("progress reading", progress.text)
+        self.assertEqual(outcome_report(self.store)["progress_count"], 1)
+
+        compose.return_value = TurnPlan("Here is the result.", False, None, [],
+                                        "test", 10, 5, "r3",
+                                        actual={"objective_id": target.commit, "value": 80,
+                                                "as_of": "Friday", "note": ""})
+        final = run_turn(self.store, "We got 80 paid users by Friday.")
+        self.assertIn("20 users", final.text)
+        report = outcome_report(self.store)
+        self.assertEqual((report["final_count"], report["missed_count"]), (1, 1))
+        self.assertEqual(report["comparisons"][0]["gap"], -20)
+
+        compose.return_value = TurnPlan("Let's review the gap.", False, None, [],
+                                        "test", 10, 5, "r4")
+        run_turn(self.store, "How calibrated were we?")
+        self.assertEqual(compose.call_args.kwargs["outcome_history"]["final_count"], 1)
+        self.assertIsNone(compose.call_args.kwargs["calibration"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_retrospective_target_and_actual_share_one_turn(self, compose):
+        objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                     "desired": 100, "direction": "at_least", "unit": "users",
+                     "deadline": "Friday", "action": ""}
+        compose.return_value = TurnPlan("That is a useful result to compare.", False, None, [],
+                                        "test", 10, 5, "r", objective=objective,
+                                        actual={"objective_id": "", "value": 70,
+                                                "as_of": "Friday", "note": ""})
+        result = run_turn(self.store, "We wanted at least 100 paid users by Friday, but got 70 paid users by Friday.")
+        payload = self.store.read_object(result.commit)["payload"]
+        self.assertEqual(payload["actual"]["objective_id"], "$self")
+        self.assertEqual(objective_records(self.store)[0]["observations"][0]["objective_id"], result.commit)
+        self.assertIn("30 users", result.text)
+        self.assertEqual(outcome_report(self.store)["missed_count"], 1)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_date_before_value_and_deadline_followup_save_target_and_result(self, compose):
+        objective = {"goal": "Grow engagement", "metric": "weekly active users",
+                     "kind": "numeric", "desired": 100, "direction": "at_least",
+                     "unit": "users", "deadline": "Jan 31", "action": ""}
+        compose.return_value = TurnPlan("By when should we check?", False, None, [],
+                                        "test", 10, 5, "r1")
+        first = run_turn(self.store, "I want at least 100 weekly active users.")
+        self.assertNotIn("objective", self.store.read_object(first.commit)["payload"])
+        compose.return_value = TurnPlan("I'll track that.", False, None, [],
+                                        "test", 10, 5, "r2", objective=objective)
+        target = run_turn(self.store, "By Jan 31.")
+        self.assertIn("objective", self.store.read_object(target.commit)["payload"])
+        compose.return_value = TurnPlan("Here's the comparison.", False, None, [],
+                                        "test", 10, 5, "r3",
+                                        actual={"objective_id": target.commit, "value": 90,
+                                                "as_of": "Jan 31", "note": ""})
+        result = run_turn(self.store, "The result on Jan 31 was 90 weekly active users.")
+        self.assertEqual(self.store.read_object(result.commit)["payload"]["actual"]["value"], 90)
+        compose.return_value = TurnPlan("The target is clear.", False, None, [],
+                                        "test", 10, 5, "r4", objective=objective)
+        date_first = run_turn(self.store, "My target by Jan 31 is 100 weekly active users.")
+        self.assertIn("objective", self.store.read_object(date_first.commit)["payload"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_different_metric_cannot_be_saved_as_target_result(self, compose):
+        objective = {"goal": "Grow engagement", "metric": "weekly active users",
+                     "kind": "numeric", "desired": 100, "direction": "at_least",
+                     "unit": "users", "deadline": "Jan 31", "action": ""}
+        compose.return_value = TurnPlan("I'll track that.", False, None, [],
+                                        "test", 10, 5, "r1", objective=objective)
+        target = run_turn(self.store, "Our goal is 100 weekly active users by Jan 31.")
+        compose.return_value = TurnPlan("Let me check which measure you mean.", False, None, [],
+                                        "test", 10, 5, "r2",
+                                        actual={"objective_id": target.commit, "value": 70,
+                                                "as_of": "Jan 31", "note": ""})
+        wrong = run_turn(self.store, "We got 70 dollars in revenue on Jan 31; weekly active users are unknown.")
+        self.assertNotIn("actual", self.store.read_object(wrong.commit)["payload"])
+        compose.return_value = TurnPlan("Those measures differ.", False, None, [],
+                                        "test", 10, 5, "r3", objective=objective,
+                                        actual={"objective_id": "", "value": 70,
+                                                "as_of": "Jan 31", "note": ""})
+        same_turn = run_turn(self.store, "Our goal is 100 weekly active users by Jan 31. We got 70 dollars in revenue on Jan 31.")
+        self.assertNotIn("actual", self.store.read_object(same_turn.commit)["payload"])
+        compose.return_value = TurnPlan("That still does not report active users.", False, None, [],
+                                        "test", 10, 5, "r4",
+                                        actual={"objective_id": target.commit, "value": 70,
+                                                "as_of": "Jan 31", "note": ""})
+        mixed = run_turn(self.store, "We got 70 dollars in revenue and weekly active users are unknown on Jan 31.")
+        self.assertNotIn("actual", self.store.read_object(mixed.commit)["payload"])
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_short_answer_to_one_measure_question_records_result(self, compose):
+        objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
+                     "desired": 100, "direction": "at_least", "unit": "users",
+                     "deadline": "Friday", "action": ""}
+        compose.return_value = TurnPlan("How many paid users did you have by Friday?",
+                                        False, None, [], "test", 10, 5, "r1",
+                                        objective=objective)
+        target = run_turn(self.store, "Our goal is 100 paid users by Friday.")
+        compose.return_value = TurnPlan("That missed the target.", False, None, [],
+                                        "test", 10, 5, "r2",
+                                        actual={"objective_id": target.commit, "value": 70,
+                                                "as_of": "Friday", "note": ""})
+        result = run_turn(self.store, "70.")
+        self.assertEqual(self.store.read_object(result.commit)["payload"]["actual"]["value"], 70)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_binary_result_after_by_deadline_is_not_a_success(self, compose):
+        objective = {"goal": "We launch by Friday", "metric": "completion", "kind": "binary",
+                     "desired": True, "direction": "exact", "unit": "", "deadline": "by Friday", "action": ""}
+        compose.return_value = TurnPlan("I'll track that.", False, None, [],
+                                        "test", 10, 5, "r1", objective=objective)
+        target = run_turn(self.store, "Our goal is to launch by Friday.")
+        compose.return_value = TurnPlan("That was late.", False, None, [],
+                                        "test", 10, 5, "r2",
+                                        actual={"objective_id": target.commit, "value": True,
+                                                "as_of": "by Friday", "note": ""})
+        late = run_turn(self.store, "We launched after Friday.")
+        self.assertNotIn("actual", self.store.read_object(late.commit)["payload"])
+        self.assertIs(_reported_outcome("We launched after Friday.",
+                      {"id": "a" * 64, "event": "We launch by Friday", "deadline": "by Friday"}), False)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
+    def test_conversation_binary_target_requires_reported_result(self, compose):
+        objective = {"goal": "Launch", "metric": "completion", "kind": "binary",
+                     "desired": True, "direction": "exact", "unit": "",
+                     "deadline": "Friday", "action": ""}
+        compose.return_value = TurnPlan("I'll track that goal.", False, None, [],
+                                        "test", 10, 5, "r1", objective=objective)
+        target = run_turn(self.store, "Our goal is to launch by Friday.")
+        compose.return_value = TurnPlan("That remains a plan.", False, None, [],
+                                        "test", 10, 5, "r2",
+                                        actual={"objective_id": target.commit, "value": True,
+                                                "as_of": "Friday", "note": ""})
+        planned = run_turn(self.store, "We plan to launch Friday.")
+        self.assertNotIn("actual", self.store.read_object(planned.commit)["payload"])
+        compose.return_value = TurnPlan("Thanks for the report.", False, None, [],
+                                        "test", 10, 5, "r3",
+                                        actual={"objective_id": target.commit, "value": True,
+                                                "as_of": "Friday", "note": ""})
+        final = run_turn(self.store, "We launched Friday.")
+        self.assertTrue(self.store.read_object(final.commit)["payload"]["actual"]["value"])
+        self.assertEqual(outcome_report(self.store)["met_count"], 1)
+
+    @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
+    @patch("pioneer.pipeline.compose_turn")
     def test_conversation_records_and_scores_its_own_forecast(self, compose):
         context = {"status": "active", "goal": "Launch timing", "options": ["launch", "wait"],
                    "known": [], "uncertain": [], "provisional_view": "Wait", "next_questions": []}
@@ -361,7 +554,7 @@ class PipelineTests(unittest.TestCase):
 
         compose.return_value = TurnPlan("One result is too little to calibrate me.", False, None, [],
                                         "test-model", 10, 5, "r4", context)
-        run_turn(self.store, "How calibrated are you?")
+        run_turn(self.store, "How accurate are your forecasts? Give me the Brier score.")
         self.assertEqual(compose.call_args.kwargs["calibration"]["count"], 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})

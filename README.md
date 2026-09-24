@@ -24,7 +24,8 @@ Most AI chat tools give you one linear thread and no way to compare options side
 - **Value of information** — weigh acting now against waiting for a signal
 - **Reversibility modeling** — account for what's recoverable if an action is later undone
 - **Optional Jev decision attention** — use TypeSafe System One to help Pioneer focus on timing, reversibility, useful information, and tensions with earlier claims
-- **Forecast feedback** — save specific yes/no forecasts with a date or resolution condition, record outcomes you report, compare the forecasts with those reports, and bring relevant history into later estimates
+- **Outcome calibration** — record what you wanted, the measure and deadline, then compare it with what you report actually happened on the same branch
+- **Forecast accuracy** — separately score specific yes/no probability estimates against user-reported results
 - **Content-addressed history** — SHA-256-hashed objects, checkable for corruption or tampering
 - **Usage ledger** — track OpenAI/Jev token usage, with optional cost estimation
 - **Local decision engine** — analyze structured decision cases with no API call at all
@@ -158,10 +159,14 @@ Inside `pioneer chat`, type `/help` to see these:
 | `/log` | Show recent saved turns |
 | `/analysis` | Show the latest complete decision calculation |
 | `/usage` | Show recorded API token usage |
+| `/target GOAL \| METRIC \| DESIRED \| WHEN [\| DIRECTION \| UNIT \| ACTION]` | Save a desired outcome; `DESIRED` is a number or yes/no |
+| `/targets` | List desired outcomes and their current status |
+| `/observe ID \| ACTUAL \| WHEN [\| NOTE]` | Report an actual result or correct an earlier report |
+| `/calibration [GOAL]` | Compare desired outcomes with reported actual results |
 | `/forecast 70% \| EVENT \| DEADLINE [\| TOPIC]` | Save a forecast you supply |
 | `/forecasts` | List unresolved forecasts on this branch |
 | `/resolve ID yes\|no` | Report whether an event happened, or correct an earlier report |
-| `/calibration [pioneer\|user\|all]` | Compare forecasts with reported outcomes |
+| `/forecast-accuracy [pioneer\|user\|all]` | Score probability forecasts against reported events |
 | `/decide FILE` | Analyze a structured decision case |
 | `/triage ACTION` | Ask Jev to assess an action |
 | `/model MODEL` | Change the OpenAI model for this session |
@@ -281,7 +286,32 @@ pioneer triage "Launch the product tomorrow"
 
 That manual diagnostic does not replace the conversational decision layer.
 
-## Learning from forecasts
+## Outcome calibration: desired versus actual
+
+Before taking an action, tell Pioneer what result you want, how you will measure it, and when you will judge it. For example: “I want the pilot to reach at least 100 weekly active users by January 31.” Pioneer can save an explicit numeric or yes/no target from conversation. If the measure, desired value, or deadline is unclear, it should ask rather than invent a target. Later, tell it the actual value and the date or condition it applies to, such as “On January 31, the pilot had 90 weekly active users.” Pioneer can connect that explicit report to a saved target and show the gap. You can always inspect or enter the same facts directly:
+
+```text
+/target Grow pilot adoption | weekly active users | 100 | 2027-01-31 | at_least | users | run a pilot
+/targets
+/observe TARGET_ID | 90 | 2027-01-31
+/calibration
+```
+
+From a shell:
+
+```bash
+pioneer target "Grow pilot adoption" "weekly active users" --desired 100 --by 2027-01-31 --unit users --action "run a pilot"
+pioneer targets
+pioneer observe TARGET_ID 80 --at 2027-01-15
+pioneer observe TARGET_ID 90 --at 2027-01-31
+pioneer calibration --goal "Grow pilot adoption"
+```
+
+The `target` command prints its ID; a unique short prefix is enough for `observe`. Numeric targets use `--direction at_least` by default and require a unit; `at_most` and `exact` are available. For a yes/no target, use `--desired yes` or `--desired no`, with no unit. In chat, `/target GOAL | METRIC | yes | DEADLINE` records a binary target. A reported value with an `--at` or `WHEN` that differs from the target's deadline is progress, so Pioneer does not count it as a final success or miss. At the deadline, it reports whether the target was met and, for numeric targets, the difference between actual and desired. A later report for that same deadline corrects the final comparison while retaining the earlier report in history. Reports at other checkpoints remain in history without replacing the final comparison.
+
+`calibration` shows targets, final results, misses, and each target's gap in its own unit. It does not average unlike measures. Targets and observations follow branch ancestry, so an alternative branch can have a different result. Actual values are user-reported; Pioneer does not verify them. A gap does not, by itself, show whether the plan, execution, or outside conditions caused it. The record is feedback for the next decision, not automatic model retraining.
+
+## Forecast accuracy
 
 When you explicitly ask Pioneer for the probability of a specific yes/no event with a clear date or resolution condition, it can give a subjective estimate and save it as a forecast. For example: “What are the chances we launch by Friday?” Pioneer records its own forecast only when its visible reply states the same percentage. If the event or resolution condition is unclear, it should ask rather than record a vague prediction. Forecast probabilities are separate from the numbers you supply to the decision engine.
 
@@ -290,7 +320,7 @@ Later, tell Pioneer an unambiguous result such as “We launched Friday.” It c
 ```text
 /forecasts
 /resolve FORECAST_ID yes
-/calibration
+/forecast-accuracy
 ```
 
 You can also track your own estimate with `/forecast 70% | We launch | Friday | Launch timing`, or from a shell:
@@ -299,12 +329,12 @@ You can also track your own estimate with `/forecast 70% | We launch | Friday | 
 pioneer forecast 70% "We launch" --by Friday --topic "Launch timing"
 pioneer forecasts
 pioneer resolve FORECAST_ID yes
-pioneer calibration --source user --topic "Launch timing"
+pioneer forecast-accuracy --source user --topic "Launch timing"
 ```
 
 The forecast ID is a saved commit ID; a unique short prefix is enough for `/resolve`. Each branch sees only forecasts and outcomes in its own ancestry. Recording the opposite result later corrects an outcome while preserving the earlier report.
 
-Calibration reports show the number of resolved forecasts, average predicted probability, user-reported event rate, a Brier score, and reported rates across five confidence ranges. The Brier score compares predictions with those reports; lower is better, and zero means perfect agreement with the recorded results. Pioneer does not independently verify outcomes. After at least five resolved **Pioneer** forecasts on the same topic, Pioneer supplies that history as limited evidence during later turns on that decision. You can ask “How calibrated are you?” for the branch-wide record. Small or selected samples can mislead, so Pioneer does not silently rewrite a new estimate or your decision-case inputs. This is local feedback, not model retraining. Jev's attention scores are not outcome forecasts and are not calibrated by this report.
+Forecast accuracy reports show the number of resolved forecasts, average predicted probability, user-reported event rate, a Brier score, and reported rates across five confidence ranges. The Brier score compares predictions with those reports; lower is better, and zero means perfect agreement with the recorded results. Pioneer does not independently verify outcomes. After at least five resolved **Pioneer** forecasts on the same topic, Pioneer supplies that history as limited evidence during later turns on that decision. Small or selected samples can mislead, so Pioneer does not silently rewrite a new estimate or your decision-case inputs. This is local feedback, not model retraining. Jev's attention scores are not outcome forecasts and are not scored by this report. This score measures probability reliability; it is separate from the desired-versus-actual comparison above.
 
 ## History and storage
 
@@ -392,10 +422,14 @@ pioneer [--repo DIR] status
 
 pioneer [--repo DIR] decide FILE [--no-save]
 pioneer [--repo DIR] triage TEXT...
+pioneer [--repo DIR] target GOAL METRIC --desired VALUE --by DEADLINE [--direction at_least|at_most|exact] [--unit UNIT] [--action ACTION]
+pioneer [--repo DIR] targets
+pioneer [--repo DIR] observe ID VALUE --at WHEN [--note NOTE]
+pioneer [--repo DIR] calibration [--goal GOAL]
 pioneer [--repo DIR] forecast PROBABILITY EVENT... --by DEADLINE [--topic TOPIC]
 pioneer [--repo DIR] forecasts
 pioneer [--repo DIR] resolve ID yes|no
-pioneer [--repo DIR] calibration [--topic TOPIC] [--source pioneer|user|all]
+pioneer [--repo DIR] forecast-accuracy [--topic TOPIC] [--source pioneer|user|all]
 
 pioneer [--repo DIR] usage [--prices FILE]
 pioneer [--repo DIR] verify
@@ -413,10 +447,11 @@ pioneer --repo ~/decisions/product-launch status
 Pioneer/
 ├── pioneer/
 │   ├── cli.py         # CLI and interactive terminal
-│   ├── calibration.py # forecasts, outcomes, and reliability scoring
+│   ├── calibration.py # forecast reliability scoring
 │   ├── decision.py    # deterministic decision engine
 │   ├── history.py     # bounded recall of earlier branch turns
 │   ├── jev.py         # optional decision attention routing
+│   ├── objectives.py  # desired targets, reported results, and gaps
 │   ├── pipeline.py    # conversational turn pipeline
 │   ├── providers.py   # OpenAI and Jev HTTP adapters
 │   └── state.py       # content-addressed workspace storage

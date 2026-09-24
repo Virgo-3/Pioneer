@@ -52,7 +52,7 @@ class CalibrationCommandTests(unittest.TestCase):
         self.assertIn(f"Forecast ID: {forecast['id']}", output)
         self.assertEqual(open_forecasts(self.store), [])
 
-        status, output, errors = self.cli("calibration", "--source", "user", "--topic", "launch")
+        status, output, errors = self.cli("forecast-accuracy", "--source", "user", "--topic", "launch")
         self.assertEqual((status, errors), (0, ""))
         self.assertIn("Resolved: 1", output)
         self.assertIn("Average forecast: 70.0%", output)
@@ -60,7 +60,7 @@ class CalibrationCommandTests(unittest.TestCase):
         self.assertIn("Brier score: 0.090", output)
         self.assertIn("Pioneer has not verified them", output)
 
-        status, output, errors = self.cli("calibration")
+        status, output, errors = self.cli("forecast-accuracy")
         self.assertEqual((status, errors), (0, ""))
         self.assertIn("No resolved Pioneer forecasts", output)
 
@@ -72,7 +72,7 @@ class CalibrationCommandTests(unittest.TestCase):
 
     def test_interactive_forecast_commands_and_errors(self):
         output, errors = self.chat(["/forecast 55% | Pilot hits target | 2027-01-01 | launch",
-                                    "/forecasts", "/resolve missing maybe", "/calibration user", "/exit"])
+                                    "/forecasts", "/resolve missing maybe", "/forecast-accuracy user", "/exit"])
         forecast = open_forecasts(self.store)[0]
         self.assertIn(forecast["id"], output)
         self.assertIn("55%", output)
@@ -80,7 +80,7 @@ class CalibrationCommandTests(unittest.TestCase):
         self.assertIn("Use /resolve ID yes|no", errors)
 
         output, errors = self.chat([f"/resolve {forecast['id'][:12]} no", "/forecasts",
-                                    "/calibration user", "/exit"])
+                                    "/forecast-accuracy user", "/exit"])
         self.assertEqual(errors, "")
         self.assertIn("did not happen", output)
         self.assertIn("No open forecasts", output)

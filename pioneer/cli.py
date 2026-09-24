@@ -13,6 +13,8 @@ from typing import Any
 
 from .calibration import add_forecast, calibration_report, open_forecasts, resolve_forecast
 from .decision import DecisionError, analyze
+from .objectives import (add_objective, compare_objective, objective_records,
+                         outcome_report, record_actual)
 from .pipeline import run_turn
 from .providers import ProviderError, triage_jev
 from .state import Store, StoreError
@@ -59,9 +61,26 @@ def _parser() -> argparse.ArgumentParser:
     resolution = sub.add_parser("resolve", help="Report whether a predicted event happened")
     resolution.add_argument("id", help="Forecast ID or unique prefix")
     resolution.add_argument("outcome", choices=("yes", "no"))
-    calibration = sub.add_parser("calibration", help="Compare predictions with reported outcomes on this branch")
-    calibration.add_argument("--topic", help="Show only one forecast topic")
-    calibration.add_argument("--source", choices=("pioneer", "user", "all"), default="pioneer")
+    target = sub.add_parser("target", help="Set a desired outcome to compare with reality later")
+    target.add_argument("goal", help="What you are trying to achieve")
+    target.add_argument("metric", help="What will be measured")
+    target.add_argument("--desired", required=True, help="Target number or yes/no")
+    target.add_argument("--by", dest="deadline", required=True, help="Check date or condition")
+    target.add_argument("--direction", choices=("at_least", "at_most", "exact"),
+                        help="Numeric success rule (default: at_least)")
+    target.add_argument("--unit", default="", help="Unit for numeric targets, such as users or dollars")
+    target.add_argument("--action", default="", help="Action associated with the target, if any")
+    sub.add_parser("targets", help="List outcome targets on this branch")
+    observe = sub.add_parser("observe", help="Record an actual value for a target")
+    observe.add_argument("id", help="Target ID or unique prefix")
+    observe.add_argument("value", help="Actual number or yes/no")
+    observe.add_argument("--at", dest="as_of", required=True, help="Observation date or condition")
+    observe.add_argument("--note", default="", help="Optional explanation of what happened")
+    calibration = sub.add_parser("calibration", help="Compare desired outcomes with reported actual outcomes")
+    calibration.add_argument("--goal", help="Show only one goal")
+    accuracy = sub.add_parser("forecast-accuracy", help="Compare forecast probabilities with reported events")
+    accuracy.add_argument("--topic", help="Show only one forecast topic")
+    accuracy.add_argument("--source", choices=("pioneer", "user", "all"), default="pioneer")
     sub.add_parser("verify", help="Check stored object hashes, refs, and ledger links")
     return parser
 
@@ -116,8 +135,17 @@ def main(argv: list[str] | None = None) -> int:
             _print_forecasts(store)
         elif args.command == "resolve":
             _resolve_forecast(store, args.id, args.outcome)
+        elif args.command == "target":
+            _target(store, args.goal, args.metric, args.desired, args.deadline,
+                    args.direction, args.unit, args.action)
+        elif args.command == "targets":
+            _print_targets(store)
+        elif args.command == "observe":
+            _observe(store, args.id, args.value, args.as_of, args.note)
         elif args.command == "calibration":
-            _print_calibration(store, source=args.source, topic=args.topic)
+            _print_outcome_calibration(store, goal=args.goal)
+        elif args.command == "forecast-accuracy":
+            _print_forecast_accuracy(store, source=args.source, topic=args.topic)
         elif args.command == "verify":
             counts = store.verify()
             print(f"Verified {counts['objects']} objects, {counts['branches']} branches, {counts['usage_entries']} usage entries.")
@@ -172,6 +200,134 @@ def _percentage(value: float) -> str:
     return f"{value * 100:g}%"
 
 
+def _measurement(value: str) -> bool | float:
+    raw = value.strip()
+    if raw.casefold() in {"yes", "true"}:
+        return True
+    if raw.casefold() in {"no", "false"}:
+        return False
+    try:
+        number = float(raw)
+    except ValueError as exc:
+        raise StoreError("Value must be a finite number or yes/no.") from exc
+    if not math.isfinite(number):
+        raise StoreError("Value must be a finite number or yes/no.")
+    return number
+
+
+def _target(store: Store, goal: str, metric: str, desired: str, deadline: str,
+            direction: str | None = None, unit: str = "", action: str = "") -> None:
+    wanted = _measurement(desired)
+    kind = "binary" if isinstance(wanted, bool) else "numeric"
+    rule = direction or ("exact" if kind == "binary" else "at_least")
+    if kind == "binary" and rule != "exact":
+        raise StoreError("A yes/no target uses the exact direction.")
+    if kind == "numeric" and not unit.strip():
+        raise StoreError("Numeric targets need a unit: --unit UNIT or /target ... | DIRECTION | UNIT.")
+    target_id = add_objective(store, {"goal": goal.strip(), "metric": metric.strip(),
+                                      "kind": kind, "desired": wanted, "direction": rule,
+                                      "unit": unit.strip(), "deadline": deadline.strip(),
+                                      "action": action.strip()})
+    print(f"Saved target {target_id[:12]} on {store.current_branch()}.")
+    when = deadline.strip() if deadline.strip().casefold().startswith("by ") else f"by {deadline.strip()}"
+    print(f"  Desired: {metric.strip()} {rule.replace('_', ' ')} {_format_value(wanted, unit)} "
+          f"{when}")
+    print(f"  Goal: {goal.strip()}")
+    print(f"  ID: {target_id}")
+
+
+def _format_value(value: bool | float, unit: str = "") -> str:
+    measured = "yes" if value is True else "no" if value is False else f"{value:g}"
+    return measured + (f" {unit}" if unit else "")
+
+
+def _chat_target(store: Store, argument: str) -> None:
+    parts = [part.strip() for part in argument.split("|")]
+    if len(parts) not in {4, 5, 6, 7} or not all(parts[:4]):
+        raise StoreError("Use /target GOAL | METRIC | DESIRED | WHEN [| DIRECTION | UNIT | ACTION].")
+    _target(store, parts[0], parts[1], parts[2], parts[3],
+            (parts[4] or None) if len(parts) >= 5 else None,
+            parts[5] if len(parts) >= 6 else "",
+            parts[6] if len(parts) == 7 else "")
+
+
+def _chat_observe(store: Store, argument: str) -> None:
+    parts = [part.strip() for part in argument.split("|")]
+    if len(parts) not in {3, 4} or not all(parts[:3]):
+        raise StoreError("Use /observe ID | ACTUAL | WHEN [| NOTE]. Find IDs with /targets.")
+    _observe(store, parts[0], parts[1], parts[2], parts[3] if len(parts) == 4 else "")
+
+
+def _print_target(comparison: dict[str, Any]) -> None:
+    unit = comparison["unit"]
+    deadline = comparison["deadline"]
+    when = deadline if deadline.casefold().startswith("by ") else f"by {deadline}"
+    print(f"  {comparison['id'][:12]}  {_brief(comparison['goal'], 90)}")
+    print(f"    {comparison['metric']}: target {_format_value(comparison['desired'], unit)} "
+          f"({comparison['direction'].replace('_', ' ')}) {when}")
+    if comparison["action"]:
+        print(f"    Action: {_brief(comparison['action'], 90)}")
+    if comparison["status"] != "unobserved":
+        qualifier = "final" if comparison["status"] == "final" else "progress only"
+        print(f"    Reported actual: {_format_value(comparison['actual'], unit)} "
+              f"at {comparison['as_of']} ({qualifier})")
+        if comparison["kind"] == "numeric":
+            prefix = "Gap" if comparison["status"] == "final" else "Provisional gap"
+            print(f"    {prefix} (actual - desired): {comparison['gap']:+g} {unit}")
+        if comparison["status"] == "final":
+            print(f"    Target {'met' if comparison['met'] else 'missed'}")
+    print(f"    ID: {comparison['id']}")
+
+
+def _print_targets(store: Store) -> None:
+    records = objective_records(store)
+    if not records:
+        print(f"No outcome targets on {store.current_branch()}.")
+        return
+    print(f"Outcome targets on {store.current_branch()} ({len(records)}):")
+    for record in records:
+        _print_target(compare_objective(record))
+
+
+def _observe(store: Store, ref: str, value: str, as_of: str, note: str = "") -> None:
+    actual = _measurement(value)
+    observation_id = record_actual(store, ref.strip(), actual, as_of.strip(), note=note.strip())
+    payload = store.read_object(observation_id)["payload"]["actual"]
+    target_id = payload["objective_id"]
+    comparison = next(compare_objective(record) for record in objective_records(store)
+                      if record["id"] == target_id)
+    print(f"Recorded actual {_format_value(actual, comparison['unit'])} for target {target_id[:12]} "
+          f"at {as_of.strip()}.")
+    if comparison["observation_id"] != observation_id:
+        print(f"The final comparison still uses the result reported at {comparison['deadline']}.")
+    elif comparison["status"] == "final":
+        print(f"Target {'met' if comparison['met'] else 'missed'}."
+              + (f" Gap (actual - desired): {comparison['gap']:+g} {comparison['unit']}."
+                 if comparison["kind"] == "numeric" else ""))
+    else:
+        print(f"Progress recorded; compare the final outcome at {comparison['deadline']}."
+              + (f" Provisional gap: {comparison['gap']:+g} {comparison['unit']}."
+                 if comparison["kind"] == "numeric" else ""))
+    print(f"Target ID: {target_id}")
+    print(f"Observation entry: {observation_id}")
+
+
+def _print_outcome_calibration(store: Store, *, goal: str | None = None) -> None:
+    report = outcome_report(store, goal=goal)
+    if report["count"] == 0:
+        print(f"No outcome targets" + (f" for {goal}" if goal else "") +
+              f" on {store.current_branch()} yet. Set one with 'target' or /target.")
+        return
+    print(f"Outcome calibration on {store.current_branch()}" +
+          (f" | goal: {goal}" if goal else ""))
+    print(f"  Targets: {report['count']} | final: {report['final_count']} "
+          f"| met: {report['met_count']} | missed: {report['missed_count']}")
+    print(f"  In progress: {report['progress_count']} | not observed: {report['unobserved_count']}")
+    for comparison in report["comparisons"]:
+        _print_target(comparison)
+    print("Actual outcomes come from your reports. A gap alone cannot prove why it happened or whether an action caused it.")
+
+
 def _forecast(store: Store, probability: str, event: str, deadline: str, topic: str = "") -> None:
     chance = _parse_probability(probability)
     forecast_id = add_forecast(store, event.strip(), chance, deadline.strip(),
@@ -207,7 +363,7 @@ def _resolve_forecast(store: Store, ref: str, outcome: str) -> None:
     print(f"Resolution entry: {resolution_id}")
 
 
-def _print_calibration(store: Store, *, source: str = "pioneer", topic: str | None = None) -> None:
+def _print_forecast_accuracy(store: Store, *, source: str = "pioneer", topic: str | None = None) -> None:
     report = calibration_report(store, source=source, topic=topic)
     count = report["count"]
     label = "Pioneer" if source == "pioneer" else "your" if source == "user" else "all"
@@ -217,9 +373,9 @@ def _print_calibration(store: Store, *, source: str = "pioneer", topic: str | No
         print(f"No resolved {subject}" + (f" for {topic}" if topic else "") +
               f" on {store.current_branch()} yet.")
         if source == "pioneer":
-            print("For your forecasts, use 'calibration --source user' or '/calibration user'.")
+            print("For your forecasts, use 'forecast-accuracy --source user' or '/forecast-accuracy user'.")
         return
-    print(f"Calibration on {store.current_branch()} | {label} forecasts" +
+    print(f"Forecast accuracy on {store.current_branch()} | {label} forecasts" +
           (f" | topic: {topic}" if topic else ""))
     print("  Outcomes were reported by a user; Pioneer has not verified them.")
     print(f"  Resolved: {count}")
@@ -456,10 +612,15 @@ def _chat(store: Store, model: str | None) -> None:
                 print("  /log                    Show recent saved turns")
                 print("  /analysis               Show the latest full calculation")
                 print("  /usage                  Show recorded API token usage")
+                print("  /target GOAL | METRIC | DESIRED | WHEN [| DIRECTION | UNIT | ACTION]")
+                print("                           Save a desired outcome (DESIRED: number or yes/no)")
+                print("  /targets                List desired outcomes on this branch")
+                print("  /observe ID | ACTUAL | WHEN [| NOTE]  Report what actually happened")
+                print("  /calibration [GOAL]     Compare desired and actual outcomes")
                 print("  /forecast P | EVENT | WHEN [| TOPIC]  Save a prediction (P: 0.7 or 70%)")
                 print("  /forecasts              List open predictions and their IDs")
                 print("  /resolve ID yes|no      Report whether a predicted event happened")
-                print("  /calibration [SOURCE]   Compare forecasts with reported outcomes")
+                print("  /forecast-accuracy [SOURCE]  Score probability estimates")
                 print("  /decide FILE            Calculate a decision from JSON")
                 print("  /triage ACTION          Ask Jev to assess an action")
                 print("  /model MODEL            Select a model for this session")
@@ -508,17 +669,25 @@ def _chat(store: Store, model: str | None) -> None:
                 _print_context(store)
             elif command == "/usage" and not argument:
                 _usage(store, None)
+            elif command == "/target":
+                _chat_target(store, argument)
+            elif command == "/targets" and not argument:
+                _print_targets(store)
+            elif command == "/observe":
+                _chat_observe(store, argument)
+            elif command == "/calibration":
+                _print_outcome_calibration(store, goal=argument.strip() or None)
             elif command == "/forecast":
                 _chat_forecast(store, argument)
             elif command == "/forecasts" and not argument:
                 _print_forecasts(store)
             elif command == "/resolve":
                 _chat_resolve(store, argument)
-            elif command == "/calibration":
+            elif command == "/forecast-accuracy":
                 source = argument.strip().lower() or "pioneer"
                 if source not in {"pioneer", "user", "all"}:
-                    raise StoreError("Use /calibration [pioneer|user|all].")
-                _print_calibration(store, source=source)
+                    raise StoreError("Use /forecast-accuracy [pioneer|user|all].")
+                _print_forecast_accuracy(store, source=source)
             elif command == "/analysis" and not argument:
                 for _, obj in store.log():
                     payload = obj["payload"]
