@@ -6,7 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from pioneer.cli import _ask, _chat
+from pioneer.cli import _ask, _chat, main
 from pioneer.pipeline import TurnOutcome
 from pioneer.state import Store
 
@@ -40,6 +40,32 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(errors, "")
         run_turn.assert_called_once_with(self.store, "Should we launch?", model=None)
 
+    def test_usage_shows_openai_call_purposes_in_chat_and_cli(self):
+        self.store.commit("note", {"title": "Usage"}, usage=[
+            {"provider": "openai", "model": "test-model", "input_tokens": 10,
+             "output_tokens": 5},  # Older and primary answer calls have no purpose field.
+            {"provider": "openai", "model": "test-model", "input_tokens": 3,
+             "output_tokens": 2, "purpose": "state_check"},
+            {"provider": "openai", "model": "test-model", "input_tokens": 4,
+             "output_tokens": 1, "purpose": "history_review"},
+            {"provider": "jev", "model": "jev-test", "input_tokens": 6,
+             "output_tokens": 2},
+        ])
+        expected = ("openai/test-model: 3 calls | 17 input | 8 output tokens | "
+                    "answer: 1, state check: 1, history review: 1")
+        chat_output, errors = self.chat(["/usage", "/exit"])
+        self.assertIn(expected, chat_output)
+        self.assertIn("jev/jev-test: 1 calls | 6 input | 2 output tokens", chat_output)
+        self.assertEqual(errors, "")
+
+        prices = Path(self.temp.name) / "prices.json"
+        prices.write_text(json.dumps({"test-model": {"input_per_million": 2,
+                                                       "output_per_million": 4}}), encoding="utf-8")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(["--repo", self.temp.name, "usage", "--prices", str(prices)]), 0)
+        self.assertIn(expected + " | estimated $0.000066", output.getvalue())
+
     @patch("pioneer.cli.run_turn")
     def test_chat_displays_local_records_after_the_model_reply(self, run_turn):
         run_turn.return_value = TurnOutcome(
@@ -49,10 +75,12 @@ class ChatTests(unittest.TestCase):
         output, errors = self.chat(["What should we do?", "/exit"])
         lines = output.splitlines()
         self.assertIn("OpenAI: I would try the pilot first.", lines)
-        self.assertIn("Pioneer check: Saved the desired outcome: 100 users by Friday.", lines)
-        self.assertIn("Pioneer check: Current gap from the target: 30 users.", lines)
+        self.assertIn("Pioneer checks:", lines)
+        self.assertIn("  - Saved the desired outcome: 100 users by Friday.", lines)
+        self.assertIn("  - Current gap from the target: 30 users.", lines)
         self.assertLess(lines.index("OpenAI: I would try the pilot first."),
-                        lines.index("Pioneer check: Saved the desired outcome: 100 users by Friday."))
+                        lines.index("Pioneer checks:"))
+        self.assertEqual(output.count("Pioneer checks:"), 1)
         self.assertEqual(errors, "")
 
     @patch("pioneer.cli.run_turn")
@@ -80,8 +108,52 @@ class ChatTests(unittest.TestCase):
             _ask(self.store, "Should we launch?")
         lines = output.getvalue().splitlines()
         self.assertEqual(lines[0], "OpenAI: I think we can launch now.")
-        self.assertIn(f"Pioneer source {source[:12]}: OpenAI said", lines[1])
-        self.assertEqual(lines[2], "OpenAI challenge: What changed your view?")
+        self.assertEqual(lines[1], f'Pioneer history check: Earlier OpenAI at {source[:12]}: "We should wait for legal review."')
+        self.assertEqual(lines[2], "OpenAI review asks: What changed your view?")
+
+    @patch("pioneer.cli.run_turn")
+    def test_ask_preserves_reply_lines_and_marks_multiline_checks(self, run_turn):
+        run_turn.return_value = TurnOutcome(
+            "First line\n\n  Keep this indentation.\n", "a" * 64, "test-model", [],
+            None, "main", notices=("Saved target.\nCheckpoint: Friday.", "Gap: 30 users."))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _ask(self.store, "What happened?")
+        self.assertEqual(output.getvalue(),
+                         "OpenAI: First line\n\n  Keep this indentation.\n"
+                         "Pioneer checks:\n"
+                         "  - Saved target.\n"
+                         "    Checkpoint: Friday.\n"
+                         "  - Gap: 30 users.\n")
+
+    @patch("pioneer.cli.run_turn")
+    def test_single_multiline_check_stays_visibly_separate(self, run_turn):
+        run_turn.return_value = TurnOutcome(
+            "I would wait.", "a" * 64, "test-model", [], None, "main",
+            notices=("Calculation verified:\nWait value: 1.5",))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _ask(self.store, "Should I wait?")
+        self.assertEqual(output.getvalue(),
+                         "OpenAI: I would wait.\n"
+                         "Pioneer check: Calculation verified:\n"
+                         "  Wait value: 1.5\n")
+
+    @patch("pioneer.cli.run_turn")
+    def test_history_check_names_user_source_and_escapes_quote_linebreak(self, run_turn):
+        source = "a" * 64
+        run_turn.return_value = TurnOutcome(
+            "I think we can launch now.", "b" * 64, "test-model", [], None, "main",
+            history_challenge={"commit": source, "role": "user",
+                               "quote": 'I said "wait".\nUntil Friday.',
+                               "challenge": "Did the timing change?"})
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _ask(self.store, "Should we launch?")
+        self.assertEqual(output.getvalue().splitlines(),
+                         ["OpenAI: I think we can launch now.",
+                          f'Pioneer history check: Earlier You at {source[:12]}: "I said \\"wait\\".\\nUntil Friday."',
+                          "OpenAI review asks: Did the timing change?"])
 
     def test_source_inspects_both_sides_on_current_branch(self):
         source = self.store.commit("turn", {"user": "Would a pilot preserve our options?",

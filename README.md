@@ -34,11 +34,11 @@ pioneer ask "Should I launch now or run a pilot first?"
 
 ## What happens during a conversation
 
-1. Pioneer sends OpenAI up to 20 complete recent turns, capped at 24,000 characters, along with relevant working context and saved decision records. A direct request to recall older history can also include bounded, speaker-labeled quotations from this branch.
-2. OpenAI supplies an answer and proposed state updates. Pioneer displays and stores the answer **as OpenAI wrote it**. Pioneer checks any proposed target, linked probability estimate, reported outcome, standalone forecast, or numerical decision case and prints the result as a separate `Pioneer check:` line. A rejected proposal is not saved, even if OpenAI's answer describes it as settled.
-3. When a relevant earlier statement is found, a separate OpenAI review compares it with the *finished* answer. Pioneer shows an `OpenAI challenge:` only after confirming that its cited quote, speaker, and commit match this branch. `/source ID` displays both sides of the cited turn.
+1. Pioneer sends OpenAI up to 20 complete recent turns, capped at 24,000 characters, with relevant working context and saved decision records. A direct request to recall older history can also include bounded, speaker-labeled quotations from this branch. OpenAI writes a normal text answer in its own words.
+2. A separate OpenAI call reads the finished answer and proposes structured state updates. Pioneer displays and stores the conversational answer **as OpenAI wrote it**. It checks any proposed target, linked probability estimate, reported outcome, standalone forecast, or numerical decision case. Accepted records and rejected proposals appear under `Pioneer check:` or `Pioneer checks:`. A rejected proposal is not saved, even if the answer describes it as settled. If the state call fails, the answer still appears and Pioneer reports that no new records were saved from it.
+3. When a relevant earlier statement is found, another OpenAI review compares it with the *finished* answer. Pioneer verifies the cited quote, speaker, and commit against this branch before showing the source under `Pioneer history check:` and the question under `OpenAI review asks:`. `/source ID` displays both sides of the cited turn.
 
-The review is an additional billable API call when it runs. Its usage appears in `/usage`. If it fails, the original answer remains available and Pioneer reports that the review was unavailable.
+The state call is a second billable API call for normal conversation. The history review is a third when it runs. Their recorded token usage appears in `/usage`. If either check fails, the original answer remains available.
 
 **A citation proves what was said, not what is true.** Retrieval uses bounded excerpts and word overlap, so it can miss a relevant claim; the reviewer can also misread a change of mind. Pioneer does not silently rewrite OpenAI's answer or decide whether you must accept a challenge.
 
@@ -69,7 +69,7 @@ Remove `--no-save` to save the checked analysis in the current workspace. You ca
 
 ## Follow one outcome from goal to result
 
-Each desired outcome is one branch-local thread. Its target is **what you want**; linked probability estimates are **what someone expects**; observations are **what you report happened**. They stay distinct even though Pioneer shows them together. In chat, you can talk naturally: “I want at least 100 weekly active users by October 31. I think there's a 70% chance.” When a record is accepted, `Pioneer check:` confirms what was saved. `/outcomes` shows the thread.
+Each desired outcome is one branch-local thread. Its target is **what you want**; linked probability estimates are **what someone expects**; observations are **what you report happened**. They stay distinct even though Pioneer shows them together. In chat, you can talk naturally: “I want at least 100 weekly active users by October 31. I think there's a 70% chance.” When a record is accepted, a `Pioneer check` confirms what was saved. `/outcomes` shows the thread.
 
 The exact CLI path works without an API key:
 
@@ -93,7 +93,7 @@ Set `TYPESAFE_API_KEY` to let Pioneer consult System-One Jev during decision con
 
 ## Usage, storage, and integrity
 
-`pioneer usage` shows recorded OpenAI and Jev tokens by provider and model, including retrospective review calls. For an estimated cost, copy `examples/prices.example.json`, enter your actual per-million-token prices, and run `pioneer usage --prices PATH`. The example prices are zero placeholders.
+`pioneer usage` shows recorded OpenAI and Jev tokens by provider and model, including state extraction and retrospective review calls. For an estimated cost, copy `examples/prices.example.json`, enter your actual per-million-token prices, and run `pioneer usage --prices PATH`. The example prices are zero placeholders.
 
 Pioneer stores content-addressed objects, branch references, and a usage ledger under `.pioneer/` in the workspace. Run `pioneer verify` to check object hashes, references, and ledger links. This detects corruption or changes to recorded objects; it does not verify the truth of conversation content or user-reported results.
 

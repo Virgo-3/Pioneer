@@ -170,18 +170,37 @@ def main(argv: list[str] | None = None) -> int:
 def _ask(store: Store, text: str, model: str | None = None, *, interactive: bool = False) -> None:
     outcome = run_turn(store, text, model=model)
     if outcome.branched_from:
-        print(f"Exploring on {outcome.branch}. Your conversation on {outcome.branched_from} is still there.")
+        print(f"Pioneer branch: Exploring on {outcome.branch}; {outcome.branched_from} is still available.")
     if outcome.text:
         speaker = "Pioneer" if outcome.model == "local" else "OpenAI"
-        print(f"{speaker}: {outcome.text}")
-    for notice in outcome.notices:
-        print(f"Pioneer check: {notice}")
+        sys.stdout.write(f"{speaker}: {outcome.text}")
+        if not outcome.text.endswith("\n"):
+            print()
+    _print_checks(outcome.notices)
     if outcome.history_challenge:
         challenge = outcome.history_challenge
         source = ("You" if challenge["role"] == "user" else
                   "Pioneer" if challenge.get("provider") == "local" else "OpenAI")
-        print(f"Pioneer source {challenge['commit'][:12]}: {source} said “{challenge['quote']}”")
-        print(f"OpenAI challenge: {challenge['challenge']}")
+        quote = json.dumps(challenge["quote"], ensure_ascii=False)
+        print(f"Pioneer history check: Earlier {source} at {challenge['commit'][:12]}: {quote}")
+        print(f"OpenAI review asks: {challenge['challenge']}")
+
+
+def _print_checks(notices: tuple[str, ...]) -> None:
+    if not notices:
+        return
+    if len(notices) == 1:
+        lines = notices[0].splitlines() or [""]
+        print(f"Pioneer check: {lines[0]}")
+        for line in lines[1:]:
+            print(f"  {line}")
+        return
+    print("Pioneer checks:")
+    for notice in notices:
+        lines = notice.splitlines() or [""]
+        print(f"  - {lines[0]}")
+        for line in lines[1:]:
+            print(f"    {line}")
 
 
 def _show_source(store: Store, prefix: str) -> None:
@@ -601,17 +620,30 @@ def _usage(store: Store, prices_file: str | None) -> None:
         if not isinstance(prices, dict):
             raise StoreError("Price card must be a JSON object keyed by model")
     totals: dict[tuple[str, str], list[float]] = {}
+    purposes: dict[tuple[str, str], dict[str, int]] = {}
     for item in store.usage():
         key = (str(item.get("provider", "?")), str(item.get("model", "?")))
         row = totals.setdefault(key, [0.0, 0.0, 0.0])
         row[0] += int(item.get("input_tokens", 0))
         row[1] += int(item.get("output_tokens", 0))
         row[2] += 1
+        if key[0] == "openai":
+            purpose = str(item.get("purpose") or "answer")
+            if purpose not in {"answer", "state_check", "history_review"}:
+                purpose = "other"
+            counts = purposes.setdefault(key, {})
+            counts[purpose] = counts.get(purpose, 0) + 1
     if not totals:
         print("No API usage recorded.")
         return
     for (provider, model), (input_tokens, output_tokens, calls) in sorted(totals.items()):
         line = f"{provider}/{model}: {int(calls)} calls | {int(input_tokens)} input | {int(output_tokens)} output tokens"
+        if provider == "openai":
+            labels = {"answer": "answer", "state_check": "state check",
+                      "history_review": "history review", "other": "other"}
+            line += " | " + ", ".join(
+                f"{labels[purpose]}: {purposes[(provider, model)][purpose]}"
+                for purpose in labels if purposes[(provider, model)].get(purpose))
         rate = prices.get(model)
         if rate is not None:
             if not isinstance(rate, dict):
@@ -763,7 +795,7 @@ def _chat(store: Store, model: str | None) -> None:
                 return
             if command == "/help":
                 if not argument:
-                    print("Talk naturally about your goals, choices, and results. A Pioneer record line confirms a save.")
+                    print("Talk naturally about your goals, choices, and results. Pioneer checks follow replies when needed.")
                     print("Commands:")
                     print("  /branches               List conversations and their topics")
                     print("  /branch NAME            Copy this conversation to a new branch")

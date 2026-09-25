@@ -63,30 +63,39 @@ class ProviderReviewTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
-    def test_turn_schema_only_authors_reply_and_state(self, post):
+    def test_turn_separates_native_reply_from_state(self, post):
         context = {"status": "none", "goal": "", "options": [], "known": [], "uncertain": [],
                    "provisional_view": "", "next_questions": []}
-        post.return_value = _response({
-            "reply": "The pilot costs $500, and I think it may be worth that.",
+        reply = "The pilot costs $500, and I think it may be worth that."
+        post.side_effect = [{
+            "id": "resp_answer", "model": "test-model",
+            "output": [{"content": [{"type": "output_text", "text": reply}]}],
+            "usage": {"input_tokens": 18, "output_tokens": 12},
+        }, _response({
             "decision_requested": True, "case_json": None, "missing": [], "context": context,
             "explore_alternative": False, "forecast": None, "resolution": None,
-            "objective": None, "actual": None,
-        })
+            "objective": None, "actual": None, "outcome_forecast": None,
+        })]
         evidence = [{"commit": "b" * 64, "role": "assistant", "quote": "The pilot has no cost."}]
 
         plan = compose_turn([{"role": "user", "content": "Would a pilot be worth it?"}],
                             history_evidence=evidence)
 
-        self.assertEqual(plan.reply, "The pilot costs $500, and I think it may be worth that.")
+        self.assertEqual(plan.reply, reply)
         self.assertIsNone(plan.history_conflict)
-        request = post.call_args.args[2]
+        self.assertEqual(post.call_count, 2)
+        answer_request = post.call_args_list[0].args[2]
+        request = post.call_args_list[1].args[2]
+        self.assertNotIn("text", answer_request)
         schema = request["text"]["format"]["schema"]
+        self.assertNotIn("reply", schema["properties"])
         self.assertNotIn("history_conflict", schema["properties"])
         self.assertNotIn("history_conflict", schema["required"])
-        self.assertEqual(json.loads(request["input"][-2]["content"].split(": ", 1)[1])
+        self.assertEqual(json.loads(answer_request["input"][-2]["content"].split(": ", 1)[1])
                          ["retrieved_branch_statements"], evidence)
-        self.assertNotIn("keep reply free", request["instructions"])
-        self.assertNotIn("do not claim", request["instructions"])
+        state_input = json.loads(request["input"][0]["content"])
+        self.assertEqual(state_input["finished_assistant_reply"], reply)
+        self.assertEqual(state_input["retrieved_branch_statements"], evidence)
 
 
 if __name__ == "__main__":

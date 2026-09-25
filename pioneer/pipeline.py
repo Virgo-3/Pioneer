@@ -903,12 +903,16 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                          expected_head=head, expected_branch=starting_branch, usage=usage)
         raise
     usage.append(_usage("openai", plan))
+    if plan.state_usage:
+        usage.append({**plan.state_usage, "purpose": "state_check"})
     decision_requested = plan.decision_requested or bool(plan.case_json)
     result: dict[str, Any] | None = None
     case: dict[str, Any] | None = None
     validation_error: str | None = None
     reply = plan.reply
     notices: list[str] = []
+    if plan.state_error:
+        notices.append("Pioneer's state check was unavailable; no new records were saved from this reply.")
     if not reply.strip():
         store.commit("note", {"title": "Incomplete turn", "text": text, "jev": jev_assessment},
                      expected_head=head, expected_branch=starting_branch, usage=usage)
@@ -1167,6 +1171,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         payload["history_challenge"] = history_challenge
     if history_review_error:
         payload["history_review_error"] = history_review_error
+    if plan.state_error:
+        payload["state_error"] = plan.state_error
     if notices:
         payload["notices"] = notices
     if stored_forecast:

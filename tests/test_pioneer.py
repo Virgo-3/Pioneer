@@ -10,7 +10,7 @@ from pioneer.history import MAX_EVIDENCE, MAX_RECENT_CHARS, MAX_TOTAL_CHARS, rec
 from pioneer.objectives import objective_records, outcome_report
 from pioneer.pipeline import (_last_jev_assessment, _reported_outcome,
                               _visible_forecast_probability, run_turn)
-from pioneer.providers import (SYSTEM_INSTRUCTIONS, TURN_INSTRUCTIONS, ProviderError,
+from pioneer.providers import (SYSTEM_INSTRUCTIONS, STATE_INSTRUCTIONS, ProviderError,
                                HistoryReview, TurnPlan, ask_openai, assess_jev,
                                compose_turn, review_history, triage_jev)
 from pioneer.state import Store, StoreError
@@ -115,8 +115,30 @@ class DecisionTests(unittest.TestCase):
 
 
 class ProviderTests(unittest.TestCase):
+    @staticmethod
+    def _openai_response(text, *, response_id="answer_1", model="test-model",
+                         input_tokens=20, output_tokens=5):
+        return {"id": response_id, "model": model,
+                "output": [{"content": [{"type": "output_text", "text": text}]}],
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}}
+
+    @staticmethod
+    def _state(**updates):
+        state = {"decision_requested": False, "case_json": None, "missing": [],
+                 "context": {"status": "none", "goal": "", "options": [], "known": [],
+                             "uncertain": [], "provisional_view": "", "next_questions": []},
+                 "explore_alternative": False, "forecast": None, "resolution": None,
+                 "objective": None, "actual": None, "outcome_forecast": None}
+        state.update(updates)
+        return state
+
+    def _two_calls(self, post, reply, state):
+        post.side_effect = [self._openai_response(reply),
+                            self._openai_response(json.dumps(state), response_id="state_1",
+                                                  input_tokens=22, output_tokens=7)]
+
     def test_openai_instructions_do_not_script_disagreement(self):
-        instructions = (SYSTEM_INSTRUCTIONS + "\n" + TURN_INSTRUCTIONS).casefold()
+        instructions = (SYSTEM_INSTRUCTIONS + "\n" + STATE_INSTRUCTIONS).casefold()
         self.assertNotIn("do not agree merely to be agreeable", instructions)
         self.assertNotIn("don't be agreeable", instructions)
 
@@ -192,21 +214,24 @@ class ProviderTests(unittest.TestCase):
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
     def test_structured_turn_contract(self, post):
-        post.return_value = {"id": "resp_2", "model": "test-model", "output": [
-            {"content": [{"type": "output_text", "text": json.dumps({
-                "reply": "Tell me the states.", "decision_requested": True,
-                "case_json": None, "missing": ["state probabilities"],
-                "context": {"status": "active", "goal": "Decide whether to launch", "options": ["launch"],
-                            "known": [], "uncertain": ["demand"], "provisional_view": "Try a pilot",
-                            "next_questions": ["What would a pilot cost?"]},
-                "explore_alternative": False})}]}],
-            "usage": {"input_tokens": 20, "output_tokens": 5}}
+        state = self._state(
+            decision_requested=True, missing=["state probabilities"],
+            context={"status": "active", "goal": "Decide whether to launch", "options": ["launch"],
+                     "known": [], "uncertain": ["demand"], "provisional_view": "Try a pilot",
+                     "next_questions": ["What would a pilot cost?"]})
+        self._two_calls(post, "Tell me the states.", state)
         plan = compose_turn([{"role": "user", "content": "Should I launch?"}], model="test-model")
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(plan.reply, "Tell me the states.")
         self.assertTrue(plan.decision_requested)
         self.assertEqual(plan.missing, ["state probabilities"])
         self.assertEqual(plan.context["provisional_view"], "Try a pilot")
-        self.assertEqual(post.call_args.args[2]["text"]["format"]["type"], "json_schema")
-        self.assertNotIn("history_conflict", post.call_args.args[2]["text"]["format"]["schema"]["required"])
+        self.assertNotIn("text", post.call_args_list[0].args[2])
+        schema = post.call_args_list[1].args[2]["text"]["format"]["schema"]
+        self.assertNotIn("reply", schema["required"])
+        self.assertNotIn("history_conflict", schema["required"])
+        state_input = json.loads(post.call_args_list[1].args[2]["input"][0]["content"])
+        self.assertEqual(state_input["finished_assistant_reply"], "Tell me the states.")
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
@@ -214,23 +239,23 @@ class ProviderTests(unittest.TestCase):
         context = {"status": "active", "goal": "Launch timing", "options": [], "known": [],
                    "uncertain": [], "provisional_view": "Wait", "next_questions": []}
         forecast = {"event": "Launch by Friday", "probability": 0.7, "deadline": "Friday"}
-        response = {"reply": "I estimate a 70% chance of launching by Friday.",
-                    "decision_requested": False, "case_json": None, "missing": [],
-                    "context": context, "explore_alternative": False,
-                    "forecast": forecast, "resolution": None}
-        post.return_value = {"model": "test", "output": [{"content": [
-            {"type": "output_text", "text": json.dumps(response)}]}],
-            "usage": {"input_tokens": 15, "output_tokens": 7}}
+        response = self._state(context=context, forecast=forecast)
+        reply = "I estimate a 70% chance of launching by Friday."
+        self._two_calls(post, reply, response)
         plan = compose_turn([{"role": "user", "content": "What are the chances?"}],
                             calibration={"count": 5, "observed_rate": 0.4})
+        self.assertEqual(plan.reply, reply)
         self.assertEqual(plan.forecast, forecast)
         self.assertIsNone(plan.resolution)
         self.assertIn("forecast", post.call_args.args[2]["text"]["format"]["schema"]["required"])
-        self.assertIn("forecast_accuracy_history", post.call_args.args[2]["input"][-2]["content"])
+        self.assertIn("forecast_accuracy_history", post.call_args_list[0].args[2]["input"][-2]["content"])
+        self.assertIn("forecast_accuracy_history", post.call_args.args[2]["input"][0]["content"])
         response["forecast"]["probability"] = 1.5
-        post.return_value["output"][0]["content"][0]["text"] = json.dumps(response)
-        with self.assertRaises(ProviderError):
-            compose_turn([{"role": "user", "content": "What are the chances?"}])
+        self._two_calls(post, reply, response)
+        invalid = compose_turn([{"role": "user", "content": "What are the chances?"}])
+        self.assertEqual(invalid.reply, reply)
+        self.assertIsNone(invalid.forecast)
+        self.assertTrue(invalid.state_error)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
@@ -241,25 +266,24 @@ class ProviderTests(unittest.TestCase):
                      "desired": 100, "direction": "at_least", "unit": "users",
                      "deadline": "Friday", "action": ""}
         actual = {"objective_id": "", "value": 70, "as_of": "Friday", "note": ""}
-        response = {"reply": "Let's compare the result with your goal.",
-                    "decision_requested": False, "case_json": None, "missing": [],
-                    "context": context, "explore_alternative": False,
-                    "forecast": None, "resolution": None,
-                    "objective": objective, "actual": actual}
-        post.return_value = {"model": "test", "output": [{"content": [
-            {"type": "output_text", "text": json.dumps(response)}]}]}
+        response = self._state(context=context, objective=objective, actual=actual)
+        reply = "Let's compare the result with your goal."
+        self._two_calls(post, reply, response)
         plan = compose_turn([{"role": "user", "content": "We wanted 100 users; got 70."}],
                             outcome_history={"final_count": 2})
+        self.assertEqual(plan.reply, reply)
         self.assertEqual(plan.objective, objective)
         self.assertEqual(plan.actual, actual)
         schema = post.call_args.args[2]["text"]["format"]["schema"]
         self.assertIn("objective", schema["required"])
         self.assertIn("actual", schema["required"])
-        self.assertIn("outcome_history", post.call_args.args[2]["input"][-2]["content"])
+        self.assertIn("outcome_history", post.call_args_list[0].args[2]["input"][-2]["content"])
         response["actual"]["value"] = float("inf")
-        post.return_value["output"][0]["content"][0]["text"] = json.dumps(response)
-        with self.assertRaises(ProviderError):
-            compose_turn([{"role": "user", "content": "We got an impossible number."}])
+        self._two_calls(post, reply, response)
+        invalid = compose_turn([{"role": "user", "content": "We got an impossible number."}])
+        self.assertEqual(invalid.reply, reply)
+        self.assertIsNone(invalid.actual)
+        self.assertTrue(invalid.state_error)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
     @patch("pioneer.providers._post")
@@ -268,12 +292,11 @@ class ProviderTests(unittest.TestCase):
                    "uncertain": [], "provisional_view": "Wait", "next_questions": []}
         evidence = [{"commit": "a" * 64, "quote": "Wait for legal review before launch."}]
         guidance = {"attention": {"reversibility": "focus"}, "priorities": ["reversibility"]}
-        post.return_value = {"model": "test", "output": [{"content": [{"type": "output_text", "text": json.dumps({
-            "reply": "A launch now may be premature.", "decision_requested": True, "case_json": None,
-            "missing": [], "context": context, "explore_alternative": False})}]}]}
+        self._two_calls(post, "A launch now may be premature.",
+                        self._state(decision_requested=True, context=context))
         plan = compose_turn([{"role": "user", "content": "Launch now?"}], context=context,
                             history_evidence=evidence, jev_guidance=guidance)
-        payload = post.call_args.args[2]
+        payload = post.call_args_list[0].args[2]
         self.assertEqual(payload["input"][-1]["content"], "Launch now?")
         self.assertIn("retrieved_branch_statements", payload["input"][-2]["content"])
         self.assertIn("decision_attention", payload["input"][-2]["content"])
@@ -307,12 +330,13 @@ class ProviderTests(unittest.TestCase):
     @patch("pioneer.providers._post")
     def test_unusable_openai_response_exposes_returned_usage(self, post):
         post.return_value = {"id": "resp_bad", "model": "test-model", "output": [
-            {"content": [{"type": "output_text", "text": "not valid JSON"}]}],
+            {"content": []}],
             "usage": {"input_tokens": 19, "output_tokens": 4}}
         with self.assertRaises(ProviderError) as caught:
             compose_turn([{"role": "user", "content": "Hello"}], model="test-model")
         self.assertEqual(caught.exception.usage["input_tokens"], 19)
         self.assertEqual(caught.exception.usage["response_id"], "resp_bad")
+        self.assertEqual(post.call_count, 1)
 
 
 class PipelineTests(unittest.TestCase):
