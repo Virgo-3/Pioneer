@@ -17,6 +17,8 @@ from .history import RECALL_CUE, recent_messages, retrieve_history, verified_con
 from .jev import make_jev_guidance, select_jev_context, should_consult_jev
 from .objectives import (ObjectiveError, compare_objective, objective_records,
                          outcome_report, validate_objective)
+from .outcomes import (OutcomeError, outcome_report as unified_outcome_report,
+                       outcome_threads, validate_outcome_forecast)
 from .providers import ProviderError, assess_jev, compose_turn, review_history
 from .state import Store, StoreError
 
@@ -62,6 +64,7 @@ SPECIFIC_SAVE_CUE = re.compile(r"\b(?:new|revised|updated|changed|latest|current
                                re.IGNORECASE)
 FORECAST_REQUEST = re.compile(
     r"\b(?:how likely|how confident|what(?:'s| is| are) (?:the )?(?:chances?|odds|probability)|"
+    r"what (?:chances?|odds|probability) do you give|"
     r"(?:give|make) (?:me )?(?:your |a )?(?:forecast|probability estimate|odds)|"
     r"(?:give me|what is|what's) (?:a |your |the )?(?:percentage|percent chance)|"
     r"(?:estimate|predict) (?:the )?(?:chances?|odds|probability)|"
@@ -70,7 +73,9 @@ FORECAST_REQUEST = re.compile(
 OUTCOME_CALIBRATION_QUERY = re.compile(
     r"\b(?:calibrat\w*|desired.{0,30}actual|target.{0,30}actual|outcome gap|"
     r"how (?:did|have) (?:i|we) (?:do|done)|how close (?:did|were) (?:i|we))\b", re.IGNORECASE)
-FORECAST_ACCURACY_QUERY = re.compile(r"\b(?:forecast accuracy|prediction accuracy|brier)\b", re.IGNORECASE)
+FORECAST_ACCURACY_QUERY = re.compile(
+    r"\b(?:forecast accuracy|prediction accuracy|brier|"
+    r"how accurate.{0,35}(?:forecasts?|predictions?))\b", re.IGNORECASE)
 DESIRED_INTENT = re.compile(
     r"\b(?:i|we) (?:want|need|aim|hope|plan|intend|target)|"
     r"\b(?:our|my|the) (?:goal|target|desired outcome|aim)\b|"
@@ -84,6 +89,7 @@ OTHER_MEASURE = re.compile(
     r"orders?|sales|leads?|visits?|sessions?|hours?|days?|weeks?|months?)\b|[$%]",
     re.IGNORECASE)
 VISIBLE_PERCENT = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?:%|percent\b)", re.IGNORECASE)
+VISIBLE_PROBABILITY = re.compile(r"(?<![\w.])(?:0\.\d+|1\.0+)(?![\w.%])")
 CLAUSE_BREAK = re.compile(r"[.,](?!\d)|[!?;\n]|\bbut\b", re.IGNORECASE)
 CORRECTION_CUE = re.compile(
     r"(?:^\s*no\b|\b(?:actually|correction|correct that|wrong|i meant|instead|rather than)\b)",
@@ -406,6 +412,122 @@ def _visible_forecast_probability(reply: str, forecast: dict[str, Any]) -> bool:
     return False
 
 
+def _linked_probability_visible(quote: str, probability: float) -> bool:
+    """Require an explicit probability in the attributed words."""
+    percentages = [float(match.group(1)) / 100 for match in VISIBLE_PERCENT.finditer(quote)]
+    decimals = [float(match.group()) for match in VISIBLE_PROBABILITY.finditer(quote)]
+    stated = percentages + decimals
+    return len(stated) == 1 and math.isclose(stated[0], probability, abs_tol=0.0001)
+
+
+def _linked_probability_clause(source_text: str, quote: str) -> str:
+    """Return the clause containing the attributed probability, not another event."""
+    position = source_text.find(quote)
+    if position < 0:
+        return ""
+    end = position + len(quote)
+    breaks = list(CLAUSE_BREAK.finditer(source_text))
+    left = max((item.end() for item in breaks if item.end() <= position), default=0)
+    right = min((item.start() for item in breaks if item.start() >= end),
+                default=len(source_text))
+    return source_text[left:right].strip()
+
+
+def _linked_author_supported(clause: str, source: str) -> bool:
+    """A quoted estimate must belong to the speaker whose score it affects."""
+    if source == "openai":
+        return not bool(re.search(
+            r"\b(?:you (?:said|estimated|predicted|put|gave)|your (?:estimate|forecast|"
+            r"prediction|number|view|belief)|according to you|as you said)\b",
+            clause, re.IGNORECASE))
+    return not bool(re.search(
+        r"\b(?:you (?:said|estimated|predicted|put|gave)|your (?:estimate|forecast|"
+        r"prediction|number|view|belief)|openai'?s? (?:estimate|forecast|prediction))\b",
+        clause, re.IGNORECASE))
+
+
+def _bare_estimate_clause(clause: str) -> bool:
+    """Allow a short direct answer when the target is clear from the question."""
+    return bool(re.fullmatch(
+        r"\s*(?:(?:i|we)\s+(?:think|estimate|guess|say|put it at)\s+|"
+        r"(?:my|our)\s+(?:estimate|forecast|probability)\s+(?:is|would be)\s+)?"
+        r"(?:about\s+|roughly\s+|around\s+|a\s+)?"
+        r"(?:\d+(?:\.\d+)?\s*(?:%|percent)|0\.\d+|1\.0+)"
+        r"(?:\s+chance)?\s*", clause, re.IGNORECASE))
+
+
+def _linked_polarity_supported(source_text: str, quote: str,
+                               objective: dict[str, Any]) -> bool:
+    """Do not record odds of missing a target as odds of meeting it."""
+    clause = _linked_probability_clause(source_text, quote).casefold()
+    if not clause:
+        return False
+    if re.search(r"\b(?:miss(?:es|ed|ing)?|fail(?:s|ed|ing)?|fall(?:s|ing)? short)\b"
+                 r".{0,50}\b(?:target|goal|checkpoint)\b", clause):
+        return False
+    if re.search(r"\b(?:don'?t|not)\s+(?:think|believe)\b", clause):
+        return False
+    if (re.search(r"\b(?:not|never|won't|can't|cannot|don't|doesn't)\s+"
+                  r"(?:hit|meet|reach|achieve|attain)\b", clause)
+            or re.search(r"\b(?:target|goal)\s+(?:won't|will not|is not|isn't)\s+"
+                         r"(?:be\s+)?(?:met|reached|achieved)\b", clause)):
+        return False
+    negated = bool(re.search(r"\b(?:not|never|won't|wouldn't|can't|cannot|don't|doesn't|didn't)\b",
+                             clause))
+    if objective["kind"] == "numeric":
+        inverse = (r"\b(?:below|under|less than|fewer than|short of)\b"
+                   if objective["direction"] == "at_least" else
+                   r"\b(?:above|over|more than|greater than|exceed\w*)\b"
+                   if objective["direction"] == "at_most" else
+                   r"\b(?:below|under|less than|fewer than|above|over|more than|"
+                   r"greater than|exceed\w*)\b")
+        if re.search(inverse, clause) and not negated:
+            return False
+    elif objective["desired"] is True and negated:
+        return False
+    elif objective["desired"] is False:
+        if not negated and not re.search(r"\b(?:meet|hit|reach|achieve)\s+(?:the|our|my|this|that)?\s*"
+                                         r"(?:target|goal)\b", clause):
+            return False
+    return True
+
+
+def _linked_target_grounded(text: str, objective: dict[str, Any], objective_id: str,
+                            *, ambiguous: bool, prior_question: str = "") -> bool:
+    """Keep a probability attached to the target the user actually identified."""
+    if objective_id and any(objective_id.startswith(match.group())
+                            for match in re.finditer(r"\b[0-9a-f]{8,64}\b", text.casefold())):
+        return True
+    terms = _salient_terms(text)
+    metric = _salient_terms(objective["metric"])
+    goal = _salient_terms(objective["goal"])
+    named_metric = bool(metric) and metric <= terms
+    named_goal = bool(goal) and goal <= terms
+    if ambiguous:
+        return named_metric and (named_goal or _deadline_mentioned(text, objective["deadline"]))
+    if named_metric or named_goal:
+        return True
+    if (objective["kind"] == "numeric" and _number_supported(objective["desired"],
+                                                               _numbers_in_clause(text))
+            and _unit_pattern(objective["unit"]).search(text)
+            and _deadline_mentioned(text, objective["deadline"])):
+        return True
+    if re.search(r"\b(?:that|the|my|our)\s+(?:target|goal|outcome)\b", text, re.IGNORECASE):
+        return True
+    if re.search(r"\b(?:hit|reach|meet|achieve)(?:ing)?\s+(?:it|that)\b", text,
+                 re.IGNORECASE):
+        return True
+    if re.search(r"\b(?:give|assign|put)\s+(?:it|that)\s+(?:at|a)\b", text,
+                 re.IGNORECASE):
+        return True
+    return ("?" in prior_question
+            and bool(re.search(r"\b(?:chance|likely|probability|odds)\b", prior_question,
+                               re.IGNORECASE))
+            and (_metric_in_clause(prior_question, objective)
+                 or bool(re.search(r"\b(?:it|that|target|goal|outcome)\b", prior_question,
+                                   re.IGNORECASE))))
+
+
 def _reported_outcome(text: str, forecast: dict[str, Any]) -> bool | None:
     """Score a report only when it identifies the saved event and its deadline."""
     if text.rstrip().endswith("?") and not re.search(r"[.!]\s*[^?]*\?\s*$", text):
@@ -604,6 +726,17 @@ def _objective_comparison_text(comparison: dict[str, Any]) -> str:
     return result
 
 
+def _retracts_checkpoint(text: str, old_as_of: str, new_as_of: str) -> bool:
+    """Recognize an explicit correction of a result's checkpoint timing."""
+    if not CORRECTION_CUE.search(text) or old_as_of.casefold() == new_as_of.casefold():
+        return False
+    old = re.sub(r"^by\s+", "", old_as_of.strip(), flags=re.IGNORECASE)
+    return bool(re.search(r"\b(?:not|instead of|rather than)\s+(?:(?:on|by)\s+)?"
+                          + re.escape(old) + r"\b", text, re.IGNORECASE)
+                or re.search(re.escape(old) + r"\s+(?:was|is)\s+wrong\b", text,
+                             re.IGNORECASE))
+
+
 def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcome:
     store.require()
     if not text.strip():
@@ -666,6 +799,38 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             calibration_evidence = calibration_context(store, topic)
     objective_data = objective_records(store, starting_branch)
     objective_comparisons = [compare_objective(item) for item in objective_data]
+    linked_threads = outcome_threads(store, starting_branch)
+    linked_by_id = {item["id"]: item for item in linked_threads}
+    text_terms = _salient_terms(text)
+    id_threads = [item for item in linked_threads if any(
+        item["id"].startswith(prefix) for prefix in mentioned_ids)]
+    named_threads = [item for item in reversed(linked_threads)
+                     if item not in id_threads and any(
+                         terms and terms <= text_terms for terms in (
+                             _salient_terms(item["objective"]["goal"]),
+                             _salient_terms(item["objective"]["metric"]))) ]
+    prioritized_threads = (id_threads + named_threads
+                           + [item for item in reversed(linked_threads)
+                              if item["comparison"]["status"] != "final"
+                              and item not in id_threads and item not in named_threads]
+                           + [item for item in reversed(linked_threads)
+                              if item["comparison"]["status"] == "final"
+                              and item not in id_threads and item not in named_threads])
+    linked_context: list[dict[str, Any]] = []
+    for thread in prioritized_threads[:5]:
+        comparison = thread["comparison"]
+        latest_by_source = {item["source"]: item for item in thread["forecasts"]}
+        linked_context.append({
+            "id": thread["id"],
+            "goal": comparison["goal"], "metric": comparison["metric"],
+            "kind": comparison["kind"], "desired": comparison["desired"],
+            "direction": comparison["direction"], "unit": comparison["unit"],
+            "deadline": comparison["deadline"], "status": comparison["status"],
+            "reported_actual": comparison["actual"],
+            "forecasts": [{"source": source, "probability": forecast["probability"],
+                           "recorded_at": forecast["timestamp"]}
+                          for source, forecast in latest_by_source.items()],
+        })
     available_objectives = [item for item in reversed(objective_comparisons)
                             if item["status"] != "final"]
     mentioned_objectives = [item for item in available_objectives
@@ -693,6 +858,13 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         if relevant:
             outcome_evidence = {"comparisons": relevant[:3], "final_count": len(relevant),
                                 "caveat": "These are user-reported outcomes, not proven causes."}
+    if OUTCOME_CALIBRATION_QUERY.search(text) or FORECAST_ACCURACY_QUERY.search(text):
+        linked_report = unified_outcome_report(store, starting_branch)
+        linked_scores = {"scored_count": linked_report["scored_count"],
+                         "mean_brier": linked_report["mean_brier"],
+                         "by_source": linked_report["by_source"],
+                         "caveat": linked_report["caveat"]}
+        outcome_evidence = {**(outcome_evidence or {}), "linked_forecast_accuracy": linked_scores}
     jev_assessment: dict[str, Any] | None = None
     jev_guidance: dict[str, Any] | None = None
     jev_error: str | None = None
@@ -718,7 +890,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         plan = compose_turn(messages, model=model, jev_guidance=jev_guidance, context=previous_context,
                             history_evidence=history_evidence, open_forecasts=open_context,
                             recent_resolutions=resolved_context, calibration=calibration_evidence,
-                            open_objectives=objective_context,
+                            open_objectives=objective_context, open_outcomes=linked_context,
                             recent_objectives=recent_objective_context,
                             outcome_history=outcome_evidence,
                             verified_decision=_recent_verified_decision(
@@ -776,7 +948,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             validation_error = str(exc)
             notices.append(f"Proposed calculation was not verified: {validation_error}")
     stored_forecast: dict[str, Any] | None = None
-    if plan.forecast and FORECAST_REQUEST.search(text) and case is None and not validation_error:
+    if (plan.forecast and plan.outcome_forecast is None and FORECAST_REQUEST.search(text)
+            and case is None and not validation_error):
         topic = str((plan.context or {}).get("goal", "")).strip()[:120]
         try:
             candidate = validate_forecast(plan.forecast, source="pioneer", topic=topic, model=plan.model)
@@ -817,6 +990,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         except ObjectiveError:
             pass
     stored_actual: dict[str, Any] | None = None
+    actual_preview: dict[str, Any] | None = None
     comparison_text = ""
     if plan.actual and not validation_error:
         reported = plan.actual
@@ -836,16 +1010,93 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             if _actual_grounded(normalized, objective, text, messages, same_turn=same_turn,
                                 ambiguous_targets=ambiguous):
                 try:
+                    previous = (next((item for item in objective_data
+                                      if item["id"] == prospective_id), None)
+                                if not same_turn else None)
+                    replacement_id = (target["observation_id"] if correction and target
+                                      and _retracts_checkpoint(text, target["as_of"],
+                                                               normalized["as_of"]) else None)
+                    observations = [dict(item) for item in previous["observations"]] if previous else []
+                    if replacement_id:
+                        replaced = next((item for item in observations
+                                         if item["id"] == replacement_id), None)
+                        if replaced is None or replaced.get("superseded_by"):
+                            replacement_id = None
+                        else:
+                            replaced["superseded_by"] = "$pending"
+                    observations.append({"id": "", **normalized})
                     preview = compare_objective({"id": prospective_id,
                                                  "objective": objective,
-                                                 "observations": [{"id": "", **normalized}]})
+                                                 "observations": observations})
                     if not correction or target["actual"] != preview["actual"] or target["as_of"] != preview["as_of"]:
                         stored_actual = {**normalized, "objective_id": "$self" if same_turn else prospective_id}
+                        if replacement_id:
+                            stored_actual["replaces_observation_id"] = replacement_id
+                        actual_preview = preview
                         comparison_text = _objective_comparison_text(preview)
                 except ObjectiveError:
                     pass
+    stored_outcome_forecast: dict[str, Any] | None = None
+    if plan.outcome_forecast and case is None and not validation_error:
+        proposed = dict(plan.outcome_forecast)
+        if proposed.get("objective_id") == "" and stored_objective is not None:
+            proposed["objective_id"] = "$self"
+        source = proposed.get("source")
+        source_text = text if source == "user" else reply if source == "openai" else ""
+        try:
+            candidate = validate_outcome_forecast(
+                {**proposed, "model": plan.model if source == "openai" else None},
+                source_text=source_text)
+            source_clause = _linked_probability_clause(source_text, candidate["quote"])
+            objective_id = candidate["objective_id"]
+            thread = linked_by_id.get(objective_id)
+            same_turn = objective_id == "$self" and stored_objective is not None
+            objective = stored_objective if same_turn else thread["objective"] if thread else None
+            final_known = (actual_preview is not None and actual_preview["status"] == "final"
+                           and (same_turn or stored_actual is not None
+                                and stored_actual["objective_id"] == objective_id))
+            if (objective is not None and (same_turn or thread["comparison"]["status"] != "final")
+                    and not final_known and _linked_probability_visible(candidate["quote"],
+                                                                        candidate["probability"])
+                    and _linked_polarity_supported(source_text, candidate["quote"], objective)
+                    and _linked_author_supported(source_clause, source)
+                    and (source == "user" or FORECAST_REQUEST.search(text))):
+                prior_question = (messages[-2]["content"] if len(messages) >= 3
+                                  and messages[-2]["role"] == "assistant" else "")
+                ambiguous = (not same_turn and len(available_objectives) > 1)
+                grounding_text = source_clause if source == "user" else text
+                matching_targets = [item["id"] for item in available_objectives
+                                    if _linked_target_grounded(
+                                        grounding_text, item, item["id"], ambiguous=ambiguous,
+                                        prior_question=prior_question if source == "user" else "")]
+                cited_ids = [item["id"] for item in available_objectives
+                             if any(item["id"].startswith(match.group()) for match in
+                                    re.finditer(r"\b[0-9a-f]{8,64}\b", grounding_text.casefold()))]
+                antecedent = (same_turn and (
+                    _linked_target_grounded(source_clause, objective, "", ambiguous=False)
+                    or _bare_estimate_clause(source_clause))
+                    or not same_turn and (objective_id in cited_ids and len(cited_ids) == 1
+                                          or matching_targets == [objective_id]))
+                reply_scope = (source == "user" or _linked_target_grounded(
+                    source_clause, objective, objective_id, ambiguous=False)
+                    or _bare_estimate_clause(source_clause))
+                if antecedent and reply_scope:
+                    stored_outcome_forecast = candidate
+        except OutcomeError:
+            pass
     if stored_actual:
         notices.append(comparison_text)
+        if actual_preview and actual_preview["status"] == "final":
+            thread = linked_by_id.get(stored_actual["objective_id"])
+            if thread:
+                latest_eligible: dict[str, dict[str, Any]] = {}
+                for forecast in thread["forecasts"]:
+                    if thread["comparison"]["status"] != "final" or forecast["brier"] is not None:
+                        latest_eligible[forecast["source"]] = forecast
+                for source, forecast in latest_eligible.items():
+                    brier = (forecast["probability"] - int(actual_preview["met"])) ** 2
+                    notices.append(f"{source.capitalize()} forecast of {forecast['probability']:.1%} "
+                                   f"scored {brier:.3f} Brier against your reported result.")
     elif stored_objective:
         if stored_objective["kind"] == "numeric":
             target_value = (f"{stored_objective['direction'].replace('_', ' ')} "
@@ -855,23 +1106,28 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         deadline = stored_objective["deadline"]
         when = deadline if deadline.casefold().startswith("by ") else f"by {deadline}"
         notices.append(f"Target saved for {stored_objective['metric']}: {target_value} {when}.")
+    if stored_outcome_forecast:
+        source = "Your" if stored_outcome_forecast["source"] == "user" else "OpenAI's"
+        notices.append(f"{source} {stored_outcome_forecast['probability']:.1%} forecast was "
+                       "attached to this outcome.")
     rejected_records = {label for proposed, saved, label in (
-        (plan.forecast, stored_forecast, "forecast"),
+        (plan.forecast if plan.outcome_forecast is None else None, stored_forecast, "forecast"),
         (plan.resolution, stored_resolution, "forecast outcome"),
         (plan.objective, stored_objective, "target"),
-        (plan.actual, stored_actual, "reported outcome"))
+        (plan.actual, stored_actual, "reported outcome"),
+        (plan.outcome_forecast, stored_outcome_forecast, "forecast"))
         if proposed is not None and saved is None}
     if rejected_records:
         notices.append("Pioneer did not save the proposed " +
                        ", ".join(sorted(rejected_records)) + " record.")
     saved_now = {
-        "forecast": stored_forecast is not None,
+        "forecast": stored_forecast is not None or stored_outcome_forecast is not None,
         "forecast outcome": stored_resolution is not None,
         "target": stored_objective is not None,
         "reported outcome": stored_actual is not None,
     }
     saved_before = {
-        "forecast": bool(records),
+        "forecast": bool(records) or any(item["forecasts"] for item in linked_threads),
         "forecast outcome": any(
             item["resolution"] is not None for item in records),
         "target": bool(objective_data),
@@ -915,6 +1171,8 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         payload["notices"] = notices
     if stored_forecast:
         payload["forecast"] = stored_forecast
+    if stored_outcome_forecast:
+        payload["outcome_forecast"] = stored_outcome_forecast
     if stored_resolution:
         payload["resolution"] = stored_resolution
     if stored_objective:

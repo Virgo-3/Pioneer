@@ -50,6 +50,7 @@ class TurnPlan:
     resolution: dict[str, Any] | None = None
     objective: dict[str, Any] | None = None
     actual: dict[str, Any] | None = None
+    outcome_forecast: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -104,8 +105,15 @@ TURN_SCHEMA = {
             "value": {"anyOf": [{"type": "number"}, {"type": "boolean"}]},
             "as_of": {"type": "string"}, "note": {"type": "string"}},
             "required": ["objective_id", "value", "as_of", "note"], "additionalProperties": False},
+        "outcome_forecast": {"type": ["object", "null"], "properties": {
+            "objective_id": {"type": "string"},
+            "probability": {"type": "number", "minimum": 0, "maximum": 1},
+            "source": {"type": "string", "enum": ["user", "openai"]},
+            "quote": {"type": "string"}},
+            "required": ["objective_id", "probability", "source", "quote"],
+            "additionalProperties": False},
     },
-    "required": ["reply", "decision_requested", "case_json", "missing", "context", "explore_alternative", "forecast", "resolution", "objective", "actual"],
+    "required": ["reply", "decision_requested", "case_json", "missing", "context", "explore_alternative", "forecast", "resolution", "objective", "actual", "outcome_forecast"],
     "additionalProperties": False,
 }
 
@@ -141,6 +149,8 @@ Set context to the current decision's concise goal, options, known facts, uncert
 Set forecast only for your probability estimate of a specific yes/no event requested by the user, with a stated resolution condition. The reply must visibly state the same event, condition, and probability for the record to be accepted. Set resolution only for an explicit user report about a listed forecast, using its full ID and the outcome at its condition; a late event misses a by-deadline forecast. Use recent_resolutions only for an explicit correction.
 
 Set objective for a user-stated desired result with a measure, target, and checkpoint, including when the latest answer completes a target you just asked about. Numeric targets need a finite value, direction, and unit; an explicit yes/no target uses kind binary, direction exact, and unit ''. Set actual for a user-reported result tied to exactly one listed objective, or to an objective established in the same turn using objective_id ''. A short answer to your immediately preceding question can be a result when that question identified one measure and checkpoint. Use the user's reported timing. A progress reading is not a final checkpoint result. Do not infer a cause from a target gap.
+
+open_outcomes lists active target predicates and checkpoints with IDs. Set outcome_forecast only when a probability refers to whether one such target will be met at its checkpoint, or a complete same-turn objective. Use objective_id '' for that same-turn objective, otherwise the full listed ID. If the user explicitly states the probability, set source user and quote an exact, nonempty substring of the latest user message that states the probability and its event. If the user asks for your probability estimate, you may state your estimate in your reply and set source openai with an exact, nonempty substring of that reply that states the probability and its event. Do not quote a bare number when a fuller clause is available. Do not attribute your estimate to the user. Do not attribute a quoted user estimate to yourself, or odds of missing a target to odds of meeting it. Do not silently turn a desired target into a prediction. A target does not require a forecast. If its measure, threshold, or checkpoint is missing, ask one useful clarifying question when appropriate and leave the record null. Keep the separate forecast field for a standalone yes/no event that is not tied to an outcome target.
 
 Answer the user's request even when there is not enough evidence to create one of these records."""
 
@@ -253,6 +263,7 @@ def compose_turn(messages: list[dict[str, str]], *, model: str | None = None,
                  recent_resolutions: list[dict[str, Any]] | None = None,
                  calibration: dict[str, Any] | None = None,
                  open_objectives: list[dict[str, Any]] | None = None,
+                 open_outcomes: list[dict[str, Any]] | None = None,
                  recent_objectives: list[dict[str, Any]] | None = None,
                  outcome_history: dict[str, Any] | None = None,
                  verified_decision: str | None = None) -> TurnPlan:
@@ -274,8 +285,10 @@ def compose_turn(messages: list[dict[str, str]], *, model: str | None = None,
         data["recent_resolutions"] = recent_resolutions[:3]
     if calibration:
         data["forecast_accuracy_history"] = calibration
-    if open_objectives:
+    if open_objectives and open_outcomes is None:
         data["open_objectives"] = open_objectives[:5]
+    if open_outcomes:
+        data["open_outcomes"] = open_outcomes[:5]
     if recent_objectives:
         data["recent_objectives"] = recent_objectives[:3]
     if outcome_history:
@@ -318,13 +331,19 @@ def compose_turn(messages: list[dict[str, str]], *, model: str | None = None,
             or not _valid_objective(data.get("objective"))
             or not _valid_actual(data.get("actual"))):
         raise ProviderError("OpenAI returned an invalid turn plan.", usage=call_usage)
+    # State proposals are secondary to the model's reply. A malformed linked
+    # forecast must not discard a usable conversation turn.
+    outcome_forecast = data.get("outcome_forecast")
+    if not _valid_outcome_forecast(outcome_forecast):
+        outcome_forecast = None
     usage = response.get("usage") or {}
     return TurnPlan(data["reply"], data["decision_requested"], data["case_json"], data["missing"],
                     str(response.get("model", selected_model)), _tokens(usage, "input_tokens"),
                     _tokens(usage, "output_tokens"), response.get("id"), data["context"],
                     data["explore_alternative"], None,
                     data.get("forecast"), data.get("resolution"),
-                    data.get("objective"), data.get("actual"))
+                    data.get("objective"), data.get("actual"),
+                    outcome_forecast)
 
 
 def _valid_history_conflict(value: Any) -> bool:
@@ -411,6 +430,28 @@ def _valid_actual(value: Any) -> bool:
     try:
         return (isinstance(actual, bool) or isinstance(actual, (int, float))
                 and math.isfinite(float(actual)))
+    except OverflowError:
+        return False
+
+
+def _valid_outcome_forecast(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or set(value) != {"objective_id", "probability", "source", "quote"}:
+        return False
+    objective_id = value["objective_id"]
+    if (not isinstance(objective_id, str)
+            or objective_id and (len(objective_id) != 64
+                                 or any(character not in "0123456789abcdef" for character in objective_id))):
+        return False
+    if (not isinstance(value["source"], str) or value["source"] not in {"user", "openai"}
+            or not isinstance(value["quote"], str) or not value["quote"].strip()):
+        return False
+    probability = value["probability"]
+    if isinstance(probability, bool) or not isinstance(probability, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(probability)) and 0 <= probability <= 1
     except OverflowError:
         return False
 

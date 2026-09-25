@@ -1,9 +1,9 @@
 """Compare desired outcomes with results reported on the current branch.
 
 An objective records a goal, a measurable target, and when to judge it. Later
-observations are separate commits. All observations remain in history. Once a
-checkpoint result exists, comparisons use its latest correction; otherwise
-they use the latest progress report on the selected branch or commit.
+observations are separate commits. All observations remain in history. A
+correction supersedes the earlier report; comparisons use the current
+checkpoint result or, without one, the latest progress report on the branch.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def _actual_value(value: Any, objective: dict) -> float | bool:
 def _normalized_time(value: str) -> str:
     # Conservative equality prevents a progress report from becoming final just
     # because it was recorded after a date. No calendar inference is made.
-    return " ".join(value.split()).casefold()
+    return re.sub(r"^by\s+", "", " ".join(value.split()).casefold())
 
 
 def objective_records(store: Store, ref: str | None = None) -> list[dict]:
@@ -147,19 +147,39 @@ def objective_records(store: Store, ref: str | None = None) -> list[dict]:
             actual = _actual_value(observation.get("value"), record["objective"])
             as_of = _text(observation.get("as_of"), "As-of", _MAX_AS_OF, required=True)
             note = _text(observation.get("note", ""), "Result note", _MAX_NOTE)
-            record["observations"].append({
+            replaces = observation.get("replaces_observation_id")
+            prior = None
+            if replaces is not None:
+                if not isinstance(replaces, str):
+                    raise ObjectiveError(f"Result {commit_id[:8]} has an invalid correction reference.")
+                prior = next((item for item in record["observations"]
+                              if item["id"] == replaces), None)
+                if prior is None or prior.get("superseded_by"):
+                    raise ObjectiveError(f"Result {commit_id[:8]} cannot replace that observation.")
+            if _normalized_time(as_of) == _normalized_time(record["objective"]["deadline"]):
+                # A checkpoint has one current result. This also folds legacy
+                # same-checkpoint corrections that predate explicit references.
+                for earlier in record["observations"]:
+                    if (not earlier.get("superseded_by")
+                            and _normalized_time(earlier["as_of"]) == _normalized_time(as_of)):
+                        earlier["superseded_by"] = commit_id
+            entry = {
                 "id": commit_id,
                 "objective_id": objective_id,
                 "value": actual,
                 "as_of": as_of,
                 "note": note,
                 "timestamp": obj.get("timestamp"),
-            })
+            }
+            if prior is not None:
+                prior["superseded_by"] = commit_id
+                entry["replaces_observation_id"] = replaces
+            record["observations"].append(entry)
     return records
 
 
 def record_actual(store: Store, ref: str, value: float | bool, as_of: str, *,
-                  note: str = "") -> str:
+                  note: str = "", replaces: str | None = None) -> str:
     """Record progress, a final result, or a correction to an earlier report."""
     if not isinstance(ref, str) or not _HEX_PREFIX.fullmatch(ref):
         raise ObjectiveError("Use an objective ID or a unique prefix of at least four hex characters.")
@@ -174,15 +194,30 @@ def record_actual(store: Store, ref: str, value: float | bool, as_of: str, *,
         raise ObjectiveError("Objective ID prefix is ambiguous; use more characters.")
     record = matching[0]
     actual = _actual_value(value, record["objective"])
+    replaced_id = None
+    if replaces is not None:
+        if not isinstance(replaces, str) or not _HEX_PREFIX.fullmatch(replaces):
+            raise ObjectiveError("Use an observation ID or a unique prefix of at least four hex characters.")
+        prior = [item for item in record["observations"] if item["id"].startswith(replaces)]
+        if len(prior) != 1 or prior[0].get("superseded_by"):
+            raise ObjectiveError("A replaceable observation with that ID is not visible on this target.")
+        replaced_id = prior[0]["id"]
     at_checkpoint = [item for item in record["observations"]
-                     if _normalized_time(item["as_of"]) == _normalized_time(canonical_as_of)]
+                     if not item.get("superseded_by")
+                     and _normalized_time(item["as_of"]) == _normalized_time(canonical_as_of)]
     latest = at_checkpoint[-1] if at_checkpoint else None
-    if latest and latest["value"] == actual and latest["note"] == canonical_note:
+    if (replaced_id is None and latest and latest["value"] == actual
+            and latest["note"] == canonical_note):
         raise ObjectiveError("That result is already recorded.")
+    observation = {"objective_id": record["id"], "value": actual,
+                   "as_of": canonical_as_of, "note": canonical_note}
+    if replaced_id is None and latest is not None:
+        replaced_id = latest["id"]
+    if replaced_id is not None:
+        observation["replaces_observation_id"] = replaced_id
     return store.commit(
         "note",
-        {"actual": {"objective_id": record["id"], "value": actual,
-                    "as_of": canonical_as_of, "note": canonical_note}},
+        {"actual": observation},
         expected_head=head,
         expected_branch=branch,
     )
@@ -200,10 +235,12 @@ def compare_objective(record: dict) -> dict:
     if not isinstance(observations, list):
         raise ObjectiveError("Invalid objective observations.")
     deadline = _normalized_time(objective["deadline"])
-    checkpoint = [item for item in observations
+    active_observations = [item for item in observations
+                           if isinstance(item, dict) and not item.get("superseded_by")]
+    checkpoint = [item for item in active_observations
                   if isinstance(item, dict) and isinstance(item.get("as_of"), str)
                   and _normalized_time(item["as_of"]) == deadline]
-    latest = checkpoint[-1] if checkpoint else observations[-1] if observations else None
+    latest = checkpoint[-1] if checkpoint else active_observations[-1] if active_observations else None
     result = {
         "id": record.get("id"),
         **objective,

@@ -35,7 +35,7 @@ pioneer ask "Should I launch now or run a pilot first?"
 ## What happens during a conversation
 
 1. Pioneer sends OpenAI up to 20 complete recent turns, capped at 24,000 characters, along with relevant working context and saved decision records. A direct request to recall older history can also include bounded, speaker-labeled quotations from this branch.
-2. OpenAI supplies an answer and proposed state updates. Pioneer displays and stores the answer **as OpenAI wrote it**. Pioneer checks any proposed target, reported outcome, forecast, or numerical decision case and prints the result as a separate `Pioneer check:` line. A rejected proposal is not saved, even if OpenAI's answer describes it as settled.
+2. OpenAI supplies an answer and proposed state updates. Pioneer displays and stores the answer **as OpenAI wrote it**. Pioneer checks any proposed target, linked probability estimate, reported outcome, standalone forecast, or numerical decision case and prints the result as a separate `Pioneer check:` line. A rejected proposal is not saved, even if OpenAI's answer describes it as settled.
 3. When a relevant earlier statement is found, a separate OpenAI review compares it with the *finished* answer. Pioneer shows an `OpenAI challenge:` only after confirming that its cited quote, speaker, and commit match this branch. `/source ID` displays both sides of the cited turn.
 
 The review is an additional billable API call when it runs. Its usage appears in `/usage`. If it fails, the original answer remains available and Pioneer reports that the review was unavailable.
@@ -67,29 +67,25 @@ pioneer decide examples/launch-decision.json --no-save
 
 Remove `--no-save` to save the checked analysis in the current workspace. You can also discuss a numerical case in chat; Pioneer only saves a computed result when its inputs pass local validation and trace to the current decision conversation. OpenAI may still offer an opinion in its own words, which is shown separately from the checked calculation.
 
-## Measure what happened
+## Follow one outcome from goal to result
 
-Pioneer keeps desired outcomes distinct from reported actual outcomes. In chat, you can say, for example, “I want at least 100 weekly active users by October 31,” and later report the measured result at that checkpoint. A `Pioneer check:` line confirms whether a target or result was saved. You can inspect or enter them directly:
+Each desired outcome is one branch-local thread. Its target is **what you want**; linked probability estimates are **what someone expects**; observations are **what you report happened**. They stay distinct even though Pioneer shows them together. In chat, you can talk naturally: “I want at least 100 weekly active users by October 31. I think there's a 70% chance.” When a record is accepted, `Pioneer check:` confirms what was saved. `/outcomes` shows the thread.
+
+The exact CLI path works without an API key:
 
 ```sh
 pioneer target "Pilot" "weekly active users" --desired 100 --by "2026-10-31" --unit users
-pioneer targets
+pioneer predict TARGET_ID 70%
+pioneer outcomes
 pioneer observe TARGET_ID 92 --at "2026-10-31"
-pioneer calibration
+pioneer outcomes
 ```
 
-`TARGET_ID` can be a unique prefix from `pioneer targets`. Calibration compares the desired value with the user-reported actual value; Pioneer does not independently verify the report or infer why a gap occurred.
+`TARGET_ID` is the full ID or a unique prefix from `pioneer outcomes` or `pioneer targets`. In chat, use `/predict TARGET_ID | 70%` and `/observe TARGET_ID | 92 | 2026-10-31`. The linked forecast means a 70% chance **that specific target will be met at its checkpoint**; it does not create a second event definition or require a separate resolution. When you report the checkpoint result, Pioneer shows the target gap and scores each eligible earlier estimate against whether the target was met. In the example, the result is 8 users below the target. A Brier score is a probability error score; lower is better.
 
-Probability forecasts use a separate record and score:
+You can revise a forecast by recording another one. Each estimate keeps its source, wording, and time in branch history; the outcome view shows the latest estimate from each speaker and each speaker's eligible score. A forecast recorded after the final result is retained but unscored. An observation at another time is progress, not the final checkpoint result. A later correction to the checkpoint result changes the current comparison while preserving the earlier report in history. To correct a result's date with exact commands, use `pioneer observe TARGET_ID VALUE --at CORRECT_DATE --corrects OBSERVATION_ID` (or `/observe TARGET_ID | VALUE | CORRECT_DATE | NOTE | OBSERVATION_ID`). Pioneer uses your reported results; it does not independently verify them, infer the cause of a gap, or retrain the model from scores.
 
-```sh
-pioneer forecast 70% "Pilot reaches 100 users" --by "2026-10-31"
-pioneer forecasts
-pioneer resolve FORECAST_ID yes
-pioneer forecast-accuracy
-```
-
-The forecast accuracy report scores saved probability estimates against user-reported outcomes. It is feedback on those estimates, not model retraining. Use `pioneer forecast-accuracy --source user` to inspect user-entered forecasts separately.
+The older exact commands remain available: `pioneer targets` and `pioneer calibration` show desired versus reported actual values. For an event that has no target thread, `pioneer forecast PROBABILITY EVENT --by WHEN`, `pioneer resolve`, and `pioneer forecast-accuracy` still provide standalone forecasting and scoring. Use `--source user` with `forecast-accuracy` to inspect user-entered standalone forecasts.
 
 ## Optional Jev attention
 
@@ -110,6 +106,7 @@ Pioneer stores content-addressed objects, branch references, and a usage ledger 
 | `/log`, `/source ID` | Inspect history and a cited turn |
 | `/clear`, `/reset [BRANCH]` | Clear the display or restart a branch with recovery history |
 | `/usage` | Inspect API token usage |
+| `/outcomes`, `/predict ID \| P` | Inspect an outcome thread and add your probability estimate |
 | `/targets`, `/calibration` | Inspect desired and actual outcomes |
 | `/forecasts`, `/forecast-accuracy` | Inspect and score forecasts |
 | `/analysis`, `/context` | Inspect the last checked calculation or working context |
