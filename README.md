@@ -67,7 +67,7 @@ Set `TYPESAFE_API_KEY` to enable optional Jev attention signals during decision 
 
 ## Windows executable
 
-Download [Dao.exe from the latest release](https://github.com/Virgo-3/Dao/releases/latest) and double-click it. Python is not needed for the executable. On first launch, Dao creates a workspace at `%LOCALAPPDATA%\Dao\workspace` and offers OpenAI key setup or offline tools. A saved key is protected for your Windows account. `Dao.exe --help` lists CLI commands.
+Download [Dao.exe from this repository's latest release](https://github.com/Virgo-3/Pioneer/releases/latest) and double-click it. Python is not needed for the executable. On first launch, Dao creates a workspace at `%LOCALAPPDATA%\Dao\workspace` and offers OpenAI key setup or offline tools. A saved key is protected for your Windows account. `Dao.exe --help` lists CLI commands.
 
 Existing `%LOCALAPPDATA%\Pioneer\workspace` installations and `.pioneer/` workspaces remain readable in place. Dao creates `.dao/` for new workspaces. It also reads an existing saved key from the former Pioneer location and accepts the old `PIONEER_OPENAI_MODEL` and `PIONEER_JEV_MODEL` environment variables when the Dao equivalents are not set.
 
@@ -83,4 +83,4 @@ To estimate API cost, copy `examples/prices.example.json`, supply your current p
 python -m unittest discover -s tests -q
 ```
 
-The tagged Windows release workflow runs the tests, builds `Dao.exe` with PyInstaller, smoke-tests startup, and publishes it on the [Releases page](https://github.com/Virgo-3/Dao/releases).
+The tagged Windows release workflow runs the tests, builds `Dao.exe` with PyInstaller, smoke-tests startup, and publishes it on this repository's [Releases page](https://github.com/Virgo-3/Pioneer/releases). The application is named Dao; its GitHub repository remains `Virgo-3/Pioneer`.
