@@ -1,117 +1,81 @@
-# Pioneer
+# Dao
 
-**A conversational AI terminal with branchable history and explicit decision checks.**
+**A branchable record for reviewing claims and decisions.**
 
-OpenAI writes the conversational answer. Pioneer stores each turn on a branch, checks proposed records and calculations, and can compare the finished answer with earlier user or AI statements. It shows those checks separately. You can inspect the source and make the final judgment.
+Dao helps you open a question, collect evidence, and write a reasoned finding in ordinary language. Each case, evidence record, and finding is an immutable entry in the local branch history. A later finding can supersede an earlier one without erasing it. Dao does not require a formal logic language or a theorem prover.
 
-Pioneer also models the value of waiting for information, the cost of delay, and what can be recovered if an action is reversed. Its history lives in a local `.pioneer/` directory; it does not use Git internally.
+You decide what a record means. A linked quote proves that particular words appear in a saved conversation turn; it does not prove that the words are true. Dao keeps first-hand records, source quotations, calculations, and conclusions distinct.
 
 ## Get started
 
-### Windows executable
-
-Download [Pioneer.exe from the latest release](https://github.com/Virgo-3/Pioneer/releases/latest) and double click it. Python is not required. On first launch, Pioneer creates a workspace at `%LOCALAPPDATA%\Pioneer\workspace` and asks for an OpenAI API key. You can copy the key and press Enter to read it from the clipboard, choose `H` for hidden typing, or choose `O` for offline tools. If you choose to save the key, Windows encrypts it for your user account.
-
-The executable also accepts CLI commands, for example `Pioneer.exe --help`. A saved key is available to its `chat` and `ask` commands; an `OPENAI_API_KEY` environment variable takes precedence.
-
-### Python
-
-Python 3.10 or newer is required when running from source. From this repository:
+Python 3.10 or newer is required when running from source:
 
 ```sh
 python -m pip install -e .
-pioneer init
-pioneer chat
+dao init
+dao case open "Was the pilot ready to launch?"
 ```
 
-Set `OPENAI_API_KEY` in your environment before `chat` or `ask`. The `.env.example` file lists supported variable names, but Pioneer does not load it automatically. To work in another directory, put `--repo PATH` before the command, such as `pioneer --repo my-workspace init`.
+Use `dao --repo PATH` before a command to work in another directory. `dao chat` opens the interactive terminal; `dao ask "question"` runs one OpenAI conversation turn when `OPENAI_API_KEY` is set. The record commands work offline.
 
-Once in chat, talk normally about a choice, a goal, or a result. Use `/help` for the everyday controls and `/help advanced` for exact record commands. To run one turn without entering chat:
+### Review a question from records
 
 ```sh
-pioneer ask "Should I launch now or run a pilot first?"
+dao case open "Was the pilot ready to launch?"
+dao case list
+dao evidence CASE_ID "18 of 20 participants completed the pilot"
+dao evidence CASE_ID "Two participants could not sign in"
+dao case show CASE_ID
+dao finding CASE_ID disputed "Completion was strong, but access failures remain" --support FIRST_EVIDENCE_ID --oppose SECOND_EVIDENCE_ID
+dao case show CASE_ID
 ```
 
-## What happens during a conversation
+Use full IDs or unique prefixes of at least eight hexadecimal characters. `dao case show` prints them. A finding is `supported`, `refuted`, `disputed`, or `unresolved`. A supported finding needs supporting evidence, a refuted finding needs opposing evidence, and a disputed finding needs both. An unresolved finding can state what remains unknown.
 
-1. Pioneer sends OpenAI up to 20 complete recent turns, capped at 24,000 characters, with relevant working context and saved decision records. A direct request to recall older history can also include bounded, speaker-labeled quotations from this branch. OpenAI writes a normal text answer in its own words.
-2. A separate OpenAI call reads the finished answer and proposes structured state updates. Pioneer displays and stores the conversational answer **as OpenAI wrote it**. It checks any proposed target, linked probability estimate, reported outcome, standalone forecast, or numerical decision case. Accepted records and rejected proposals appear under `Pioneer check:` or `Pioneer checks:`. A rejected proposal is not saved, even if the answer describes it as settled. If the state call fails, the answer still appears and Pioneer reports that no new records were saved from it.
-3. When a relevant earlier statement is found, another OpenAI review compares it with the *finished* answer. Pioneer verifies the cited quote, speaker, and commit against this branch before showing the source under `Pioneer history check:` and the question under `OpenAI review asks:`. `/source ID` displays both sides of the cited turn.
+To revise a conclusion, add another finding with `--supersedes CURRENT_FINDING_ID`. The previous finding stays visible in `dao case show`. Support and opposition refer to evidence on the active branch. A branch cannot cite evidence that only exists on another branch.
 
-The state call is a second billable API call for normal conversation. The history review is a third when it runs. Their recorded token usage appears in `/usage`. If either check fails, the original answer remains available.
+You can link evidence to exact words in a saved conversation turn:
 
-**A citation proves what was said, not what is true.** Retrieval uses bounded excerpts and word overlap, so it can miss a relevant claim; the reviewer can also misread a change of mind. Pioneer does not silently rewrite OpenAI's answer or decide whether you must accept a challenge.
+```sh
+dao evidence CASE_ID "The earlier reply claimed the pilot was ready" --source TURN_ID --role assistant --quote "the pilot was ready"
+```
 
-## Explore alternatives without losing the original
+Dao checks that the cited turn is on the active branch and that the exact quote appears under the named speaker. Uncited evidence is labeled as a user record. Neither form receives an automatic truth verdict.
 
-In chat:
+In `dao chat`, use `/case QUESTION`, `/cases`, `/review CASE_ID`, and `/evidence CASE_ID | TEXT`. The extended form `/evidence CASE_ID | TEXT | TURN_ID | user|assistant | EXACT_QUOTE` links a quote. Use `/finding CASE_ID | STATUS | REASON | SUPPORT_IDS | OPPOSE_IDS | SUPERSEDES_ID`; separate multiple IDs with commas and leave unused trailing fields out. `/help` lists the other controls.
+
+## Conversation and branches
+
+OpenAI writes the conversational answer. Dao stores it as written, then separately checks proposed goal, forecast, outcome, and numerical decision records. When a relevant earlier statement is found, a separate review may raise a source-linked challenge. The challenge is a question to examine, not an adjudicated finding. Use `/source TURN_ID` to inspect both sides of that saved turn, then add any relevant evidence and your own finding to a case.
 
 ```text
 /branch pilot-first
 /switch pilot-first
 ```
 
-`/branch` copies the current point in the conversation; `/switch` moves to it. You can return with `/switch main`. Each branch has its own later turns and records. `/branches` lists them, `/log` shows recent saved turns, and `/source ID` opens a cited turn on the active branch.
+A branch copies the current history and gets its own later records. `/branches`, `/log`, and `/source ID` help inspect it. `/reset main` preserves the former head on a recovery branch. The CLI also has `dao branch`, `dao switch`, `dao log`, `dao show`, `dao rewind`, and `dao reset`.
 
-`/reset main` restarts `main` while saving its previous head on a recovery branch. The CLI also provides `pioneer branch`, `pioneer switch`, `pioneer log`, `pioneer show`, `pioneer rewind`, and `pioneer reset` for exact history control.
+Conversation normally uses one OpenAI call to write the reply and another to propose structured state updates. A relevant history review can make a third call. Token counts appear in `dao usage`. Dao never silently rewrites the authored answer after a check.
 
-## Compare acting, waiting, and reversing
+## Other decision tools
 
-The decision engine accepts explicit states, their probabilities, actions, payoffs, and costs. An optional wait scenario supplies signal likelihoods, delay cost, and information cost. An action outcome can include the payoff after undoing it and the cost of undoing it. Pioneer compares the best move now with waiting and choosing again after a signal.
+`dao decide examples/launch-decision.json --no-save` compares explicit actions, state probabilities, payoffs, reversal costs, and the option to wait for more information. Remove `--no-save` to keep the calculation in branch history. The calculation is an input to review, not a factual finding about the world.
 
-Try the included case without an API key:
+`dao target`, `dao predict`, `dao observe`, and `dao outcomes` follow a desired outcome from goal through forecast to reported result. `dao forecast`, `dao resolve`, and `dao forecast-accuracy` score standalone predictions. These tools use user-entered outcomes; Dao does not independently establish that an event happened.
 
-```sh
-pioneer decide examples/launch-decision.json --no-save
-```
+Set `TYPESAFE_API_KEY` to enable optional Jev attention signals during decision conversations. They concern timing, reversibility, missing information, and assumptions; they are not measured outcome probabilities. `dao triage "proposed action"` runs an explicit check.
 
-Remove `--no-save` to save the checked analysis in the current workspace. You can also discuss a numerical case in chat; Pioneer only saves a computed result when its inputs pass local validation and trace to the current decision conversation. OpenAI may still offer an opinion in its own words, which is shown separately from the checked calculation.
+## Windows executable
 
-## Follow one outcome from goal to result
+Download [Dao.exe from the latest release](https://github.com/Virgo-3/Dao/releases/latest) and double-click it. Python is not needed for the executable. On first launch, Dao creates a workspace at `%LOCALAPPDATA%\Dao\workspace` and offers OpenAI key setup or offline tools. A saved key is protected for your Windows account. `Dao.exe --help` lists CLI commands.
 
-Each desired outcome is one branch-local thread. Its target is **what you want**; linked probability estimates are **what someone expects**; observations are **what you report happened**. They stay distinct even though Pioneer shows them together. In chat, you can talk naturally: “I want at least 100 weekly active users by October 31. I think there's a 70% chance.” When a record is accepted, a `Pioneer check` confirms what was saved. `/outcomes` shows the thread.
+Existing `%LOCALAPPDATA%\Pioneer\workspace` installations and `.pioneer/` workspaces remain readable in place. Dao creates `.dao/` for new workspaces. It also reads an existing saved key from the former Pioneer location and accepts the old `PIONEER_OPENAI_MODEL` and `PIONEER_JEV_MODEL` environment variables when the Dao equivalents are not set.
 
-The exact CLI path works without an API key:
+## Storage and verification
 
-```sh
-pioneer target "Pilot" "weekly active users" --desired 100 --by "2026-10-31" --unit users
-pioneer predict TARGET_ID 70%
-pioneer outcomes
-pioneer observe TARGET_ID 92 --at "2026-10-31"
-pioneer outcomes
-```
+Dao stores content-addressed objects, branch pointers, and a usage ledger under `.dao/` in new workspaces. Run `dao verify` to check object hashes, refs, and ledger links. This detects storage corruption or altered records; it does not verify the truth of a claim. Branch history is local to the workspace and does not use Git internally.
 
-`TARGET_ID` is the full ID or a unique prefix from `pioneer outcomes` or `pioneer targets`. In chat, use `/predict TARGET_ID | 70%` and `/observe TARGET_ID | 92 | 2026-10-31`. The linked forecast means a 70% chance **that specific target will be met at its checkpoint**; it does not create a second event definition or require a separate resolution. When you report the checkpoint result, Pioneer shows the target gap and scores each eligible earlier estimate against whether the target was met. In the example, the result is 8 users below the target. A Brier score is a probability error score; lower is better.
-
-You can revise a forecast by recording another one. Each estimate keeps its source, wording, and time in branch history; the outcome view shows the latest estimate from each speaker and each speaker's eligible score. A forecast recorded after the final result is retained but unscored. An observation at another time is progress, not the final checkpoint result. A later correction to the checkpoint result changes the current comparison while preserving the earlier report in history. To correct a result's date with exact commands, use `pioneer observe TARGET_ID VALUE --at CORRECT_DATE --corrects OBSERVATION_ID` (or `/observe TARGET_ID | VALUE | CORRECT_DATE | NOTE | OBSERVATION_ID`). Pioneer uses your reported results; it does not independently verify them, infer the cause of a gap, or retrain the model from scores.
-
-The older exact commands remain available: `pioneer targets` and `pioneer calibration` show desired versus reported actual values. For an event that has no target thread, `pioneer forecast PROBABILITY EVENT --by WHEN`, `pioneer resolve`, and `pioneer forecast-accuracy` still provide standalone forecasting and scoring. Use `--source user` with `forecast-accuracy` to inspect user-entered standalone forecasts.
-
-## Optional Jev attention
-
-Set `TYPESAFE_API_KEY` to let Pioneer consult System-One Jev during decision conversations. Jev supplies narrow attention signals about timing, reversibility, missing information, and assumptions in recent user context. Those signals can inform the conversation; they are not outcome probabilities or commands to choose an action. Ordinary chat and the local decision engine work without Jev. `pioneer triage "your proposed action"` is an explicit Jev check.
-
-## Usage, storage, and integrity
-
-`pioneer usage` shows recorded OpenAI and Jev tokens by provider and model, including state extraction and retrospective review calls. For an estimated cost, copy `examples/prices.example.json`, enter your actual per-million-token prices, and run `pioneer usage --prices PATH`. The example prices are zero placeholders.
-
-Pioneer stores content-addressed objects, branch references, and a usage ledger under `.pioneer/` in the workspace. Run `pioneer verify` to check object hashes, references, and ledger links. This detects corruption or changes to recorded objects; it does not verify the truth of conversation content or user-reported results.
-
-## Useful commands
-
-| In chat | Purpose |
-| --- | --- |
-| `/help`, `/help advanced` | Show conversational and exact controls |
-| `/branch NAME`, `/switch NAME`, `/branches` | Explore and navigate branches |
-| `/log`, `/source ID` | Inspect history and a cited turn |
-| `/clear`, `/reset [BRANCH]` | Clear the display or restart a branch with recovery history |
-| `/usage` | Inspect API token usage |
-| `/outcomes`, `/predict ID \| P` | Inspect an outcome thread and add your probability estimate |
-| `/targets`, `/calibration` | Inspect desired and actual outcomes |
-| `/forecasts`, `/forecast-accuracy` | Inspect and score forecasts |
-| `/analysis`, `/context` | Inspect the last checked calculation or working context |
-
-Run `pioneer --help` for the complete CLI reference.
+To estimate API cost, copy `examples/prices.example.json`, supply your current prices, and run `dao usage --prices PATH`. The example prices are zero placeholders.
 
 ## Develop
 
@@ -119,4 +83,4 @@ Run `pioneer --help` for the complete CLI reference.
 python -m unittest discover -s tests -q
 ```
 
-The tagged Windows release workflow runs the tests, builds a one-file `Pioneer.exe` with PyInstaller, smoke tests startup, and publishes the executable on the [Releases page](https://github.com/Virgo-3/Pioneer/releases).
+The tagged Windows release workflow runs the tests, builds `Dao.exe` with PyInstaller, smoke-tests startup, and publishes it on the [Releases page](https://github.com/Virgo-3/Dao/releases).

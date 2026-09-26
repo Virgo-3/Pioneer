@@ -4,15 +4,15 @@ import math
 import tempfile
 import unittest
 
-from pioneer.calibration import add_forecast
-from pioneer.objectives import add_objective, record_actual, validate_objective
-from pioneer.outcomes import (
+from dao.calibration import add_forecast
+from dao.objectives import add_objective, record_actual, validate_objective
+from dao.outcomes import (
     OutcomeError,
     outcome_report,
     outcome_threads,
     validate_outcome_forecast,
 )
-from pioneer.state import Store
+from dao.state import Store
 
 
 def target(**overrides):
@@ -178,7 +178,7 @@ class OutcomeThreadTests(unittest.TestCase):
             {"objective_id": "abcd"}, {"objective_id": "$bad"},
             {"probability": -0.1}, {"probability": 1.1},
             {"probability": True}, {"probability": math.nan},
-            {"probability": 10 ** 1000}, {"source": "pioneer"},
+            {"probability": 10 ** 1000}, {"source": "dao"},
             {"source": []}, {"quote": " "}, {"model": " "},
         ):
             with self.subTest(override=override), self.assertRaises(OutcomeError):

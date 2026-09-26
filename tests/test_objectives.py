@@ -3,7 +3,7 @@
 import tempfile
 import unittest
 
-from pioneer.objectives import (
+from dao.objectives import (
     ObjectiveError,
     add_objective,
     compare_objective,
@@ -13,7 +13,7 @@ from pioneer.objectives import (
     record_actual,
     validate_objective,
 )
-from pioneer.state import Store, StoreError
+from dao.state import Store, StoreError
 
 
 def numeric(**overrides):

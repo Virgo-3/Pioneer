@@ -1,4 +1,4 @@
-"""A native OpenAI reply remains the turn even when Pioneer's state check fails."""
+"""A native OpenAI reply remains the turn even when Dao's state check fails."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pioneer.pipeline import run_turn
-from pioneer.providers import ProviderError, TurnPlan, compose_turn
-from pioneer.state import Store
+from dao.pipeline import run_turn
+from dao.providers import ProviderError, TurnPlan, compose_turn
+from dao.state import Store
 
 
 EMPTY_CONTEXT = {
@@ -40,7 +40,7 @@ def _state() -> dict:
 
 class NativeTurnProviderTests(unittest.TestCase):
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_native_answer_is_authored_before_separate_state_extraction(self, post):
         post.side_effect = [
             _response(NATIVE_REPLY, response_id="answer_1", model="answer-model",
@@ -72,7 +72,7 @@ class NativeTurnProviderTests(unittest.TestCase):
         self.assertIsNone(plan.state_error)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_invalid_state_json_preserves_answer_and_extraction_usage(self, post):
         post.side_effect = [
             _response(NATIVE_REPLY, response_id="answer_2", model="answer-model",
@@ -93,7 +93,7 @@ class NativeTurnProviderTests(unittest.TestCase):
         self.assertIsNone(plan.case_json)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_state_request_failure_preserves_answer_without_fabricating_usage(self, post):
         post.side_effect = [
             _response(NATIVE_REPLY, response_id="answer_3", model="answer-model",
@@ -111,7 +111,7 @@ class NativeTurnProviderTests(unittest.TestCase):
 
 class NativeTurnPipelineTests(unittest.TestCase):
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test", "TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_failed_state_check_commits_exact_answer_and_accounts_for_both_calls(self, compose):
         state_usage = {
             "provider": "openai", "model": "state-model", "input_tokens": 23,

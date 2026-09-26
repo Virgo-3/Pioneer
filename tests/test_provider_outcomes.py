@@ -6,7 +6,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from pioneer.providers import TURN_SCHEMA, compose_turn
+from dao.providers import TURN_SCHEMA, compose_turn
 
 
 OBJECTIVE_ID = "a" * 64
@@ -48,7 +48,7 @@ class ProviderOutcomeTests(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_combined_open_outcomes_replaces_duplicate_objective_context(self, post):
         _two_calls(post, _payload({"objective_id": OBJECTIVE_ID,
                                    "probability": .7, "source": "user",
@@ -71,7 +71,7 @@ class ProviderOutcomeTests(unittest.TestCase):
         self.assertIn("Do not attribute an OpenAI estimate to the user", request["instructions"])
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_legacy_objective_context_and_no_forced_probability(self, post):
         _two_calls(post, _payload())
         plan = compose_turn([{"role": "user", "content": "I want 100 users by October."}],
@@ -81,7 +81,7 @@ class ProviderOutcomeTests(unittest.TestCase):
         self.assertIn("open_objectives", context)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_openai_attributed_forecast_accepts_same_turn_objective(self, post):
         _two_calls(post, _payload({"objective_id": "", "probability": .7,
                                    "source": "openai", "quote": "70% chance"}))
@@ -90,7 +90,7 @@ class ProviderOutcomeTests(unittest.TestCase):
         self.assertEqual(plan.outcome_forecast["source"], "openai")
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_invalid_linked_forecast_does_not_discard_authored_reply(self, post):
         bad_records = [
             {"objective_id": OBJECTIVE_ID, "probability": 1.2, "source": "user", "quote": "70%"},

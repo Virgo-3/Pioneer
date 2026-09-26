@@ -17,6 +17,11 @@ class _DataBlob(ctypes.Structure):
 
 def credential_path() -> Path:
     roaming = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    return roaming / "Dao" / "openai-key.dpapi"
+
+
+def _legacy_credential_path() -> Path:
+    roaming = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
     return roaming / "Pioneer" / "openai-key.dpapi"
 
 
@@ -103,7 +108,9 @@ def save_openai_key(key: str, path: Path | None = None) -> None:
 
 
 def load_openai_key(path: Path | None = None) -> str | None:
-    path = path or credential_path()
+    if path is None:
+        current = credential_path()
+        path = current if current.is_file() or not _legacy_credential_path().is_file() else _legacy_credential_path()
     try:
         encrypted = path.read_bytes()
     except FileNotFoundError:

@@ -19,9 +19,9 @@ RECALL_CUE = re.compile(
     r"(?:what|why) did (?:i|you|we) say|what have (?:i|you|we) said|"
     r"(?:i|you|we) (?:said|claimed|argued)|(?:didn't|did not) you say|"
     r"challenge (?:that|this|it|your|my)|where did (?:that|this|it) come from|"
-    r"(?:did (?:you|we|pioneer)|what did (?:you|we|pioneer)) "
+    r"(?:did (?:you|we|dao)|what did (?:you|we|dao)) "
     r"(?:save|record|log|store|track)|"
-    r"have (?:you|we|pioneer) (?:saved|recorded|logged|stored|tracked)|"
+    r"have (?:you|we|dao) (?:saved|recorded|logged|stored|tracked)|"
     r"(?:was|is) (?:my|our|the) (?:target|goal|forecast|prediction|outcome|result|decision|record) "
     r"(?:saved|recorded|logged|stored|tracked))\b",
     re.IGNORECASE,

@@ -52,8 +52,8 @@ def validate_forecast(value: dict, *, source: str, topic: str = "",
     if (isinstance(probability, bool) or not isinstance(probability, (int, float))
             or not 0 <= probability <= 1 or not math.isfinite(float(probability))):
         raise CalibrationError("Probability must be a finite number from 0 to 1.")
-    if source not in {"pioneer", "user"}:
-        raise CalibrationError("Forecast source must be 'pioneer' or 'user'.")
+    if source not in {"dao", "pioneer", "user"}:
+        raise CalibrationError("Forecast source must be 'dao' or 'user'.")
     canonical_topic = _bounded_text(topic, "Topic", _MAX_TOPIC)
     canonical_model = None if model is None else _bounded_text(model, "Model", _MAX_MODEL, required=True)
     return {
@@ -143,16 +143,18 @@ def resolve_forecast(store: Store, ref: str, outcome: bool, *, note: str = "") -
                         expected_head=head, expected_branch=branch)
 
 
-def calibration_report(store: Store, ref: str | None = None, *, source: str = "pioneer",
+def calibration_report(store: Store, ref: str | None = None, *, source: str = "dao",
                        topic: str | None = None) -> dict:
     """Score resolved binary forecasts; an empty sample has null metrics."""
-    if source not in {"pioneer", "user", "all"}:
-        raise CalibrationError("Source must be 'pioneer', 'user', or 'all'.")
+    if source not in {"dao", "pioneer", "user", "all"}:
+        raise CalibrationError("Source must be 'dao', 'user', or 'all'.")
     selected_topic = None if topic is None else _bounded_text(topic, "Topic", _MAX_TOPIC)
     selected = []
     for record in forecast_records(store, ref):
         forecast, resolution = record["forecast"], record["resolution"]
-        if resolution is None or (source != "all" and forecast["source"] != source):
+        if resolution is None or (source != "all" and
+                                  not (source == "dao" and forecast["source"] in {"dao", "pioneer"})
+                                  and forecast["source"] != source):
             continue
         if selected_topic is not None and forecast["topic"].casefold() != selected_topic.casefold():
             continue
@@ -184,7 +186,7 @@ def calibration_report(store: Store, ref: str | None = None, *, source: str = "p
 
 
 def calibration_context(store: Store, topic: str, *, min_count: int = 5) -> dict | None:
-    """Offer same-topic Pioneer feedback only when there is enough local data.
+    """Offer same-topic Dao feedback only when there is enough local data.
 
     The summary is evidence for human/model reflection, never a multiplier or
     automatic rewrite of a new forecast probability.
@@ -192,7 +194,7 @@ def calibration_context(store: Store, topic: str, *, min_count: int = 5) -> dict
     canonical_topic = _bounded_text(topic, "Topic", _MAX_TOPIC, required=True)
     if isinstance(min_count, bool) or not isinstance(min_count, int) or min_count < 1:
         raise CalibrationError("Minimum count must be a positive integer.")
-    report = calibration_report(store, source="pioneer", topic=canonical_topic)
+    report = calibration_report(store, source="dao", topic=canonical_topic)
     if report["count"] < min_count:
         return None
     return {**report, "caveat": (

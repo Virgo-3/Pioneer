@@ -4,11 +4,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pioneer.objectives import add_objective
-from pioneer.outcomes import outcome_report, outcome_threads
-from pioneer.pipeline import run_turn
-from pioneer.providers import HistoryReview, TurnPlan
-from pioneer.state import Store
+from dao.objectives import add_objective
+from dao.outcomes import outcome_report, outcome_threads
+from dao.pipeline import run_turn
+from dao.providers import HistoryReview, TurnPlan
+from dao.state import Store
 
 
 TARGET = {
@@ -30,11 +30,11 @@ class ConversationalOutcomeTests(unittest.TestCase):
         self.store = Store(self.temp.name)
         self.store.init()
         self.addCleanup(self.temp.cleanup)
-        self.review = patch("pioneer.pipeline.review_history")
+        self.review = patch("dao.pipeline.review_history")
         self.review.start().return_value = HistoryReview(None, "openai-test", 3, 2, "review-test")
         self.addCleanup(self.review.stop)
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_user_forecast_same_turn_target_then_progress_final_and_correction(self, compose):
         user = ("I want at least 100 active users by Friday for the pilot. "
                 "I think there is a 70% chance we hit the target.")
@@ -69,7 +69,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         self.assertAlmostEqual(outcome_threads(self.store)[0]["forecasts"][0]["brier"], 0.09)
         self.assertIn("Brier", "\n".join(corrected.notices))
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_openai_estimate_is_attributed_to_openai_and_branch_local(self, compose):
         target = add_objective(self.store, TARGET)
         reply = "I estimate a 60% chance of meeting it."
@@ -83,7 +83,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         self.store.create_branch("before-estimate", from_ref=target)
         self.assertEqual(outcome_threads(self.store, "before-estimate")[0]["forecasts"], [])
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_wrong_attribution_or_probability_does_not_create_a_record(self, compose):
         target = add_objective(self.store, TARGET)
         compose.return_value = plan("I can reason about the target.", forecast={
@@ -99,7 +99,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         self.assertNotIn("outcome_forecast", self.store.read_object(second.commit)["payload"])
         self.assertEqual(outcome_threads(self.store)[0]["forecasts"], [])
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_known_result_cannot_be_predicted_after_the_fact(self, compose):
         target = add_objective(self.store, TARGET)
         compose.return_value = plan("The checkpoint was missed.", actual={
@@ -111,7 +111,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         self.assertNotIn("outcome_forecast", self.store.read_object(late.commit)["payload"])
         self.assertEqual(outcome_report(self.store)["scored_count"], 0)
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_ambiguous_target_is_not_linked_by_shared_name(self, compose):
         first = add_objective(self.store, TARGET)
         add_objective(self.store, {**TARGET, "desired": 200, "deadline": "Sunday"})
@@ -125,7 +125,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         explicit = run_turn(self.store, f"I give target {first[:12]} a 70% chance.")
         self.assertIn("outcome_forecast", self.store.read_object(explicit.commit)["payload"])
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_odds_of_missing_cannot_be_saved_as_odds_of_meeting(self, compose):
         target = add_objective(self.store, TARGET)
         compose.return_value = plan("That sounds concerning.", forecast={
@@ -139,7 +139,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         model = run_turn(self.store, "How likely is our active users target by Friday?")
         self.assertNotIn("outcome_forecast", self.store.read_object(model.commit)["payload"])
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_probability_must_belong_to_the_same_clause_and_speaker(self, compose):
         target = add_objective(self.store, TARGET)
         compose.return_value = plan("Rain is a separate event.", forecast={
@@ -156,7 +156,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
                                      "How likely is it in your view?")
         self.assertNotIn("outcome_forecast", self.store.read_object(model.commit)["payload"])
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_short_answer_to_probability_question_links_one_open_target(self, compose):
         target = add_objective(self.store, TARGET)
         self.store.commit("turn", {"user": "What is our target?",
@@ -166,7 +166,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         answer = run_turn(self.store, "70%")
         self.assertIn("outcome_forecast", self.store.read_object(answer.commit)["payload"])
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_explicit_timing_correction_retracts_a_final_score(self, compose):
         target = add_objective(self.store, TARGET)
         self.store.commit("note", {"outcome_forecast": {
@@ -184,7 +184,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         self.assertEqual(outcome_report(self.store)["progress_count"], 1)
         self.assertEqual(outcome_report(self.store)["scored_count"], 0)
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_negative_wording_can_mean_meeting_a_negative_target(self, compose):
         binary = add_objective(self.store, {
             "goal": "Project launch", "metric": "Project launch", "kind": "binary",
@@ -212,7 +212,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
                                       "budget spend by Friday.")
         self.assertIn("outcome_forecast", self.store.read_object(budget.commit)["payload"])
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_accuracy_question_supplies_source_split_to_openai(self, compose):
         target = add_objective(self.store, TARGET)
         self.store.commit("note", {"outcome_forecast": {
@@ -221,7 +221,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         self.store.commit("note", {"outcome_forecast": {
             "objective_id": target, "probability": 0.9,
             "source": "openai", "quote": "90% chance", "model": "test"}})
-        from pioneer.objectives import record_actual
+        from dao.objectives import record_actual
         record_actual(self.store, target, 110, "Friday")
         compose.return_value = plan("I was closer on that result.")
         run_turn(self.store, "How accurate are your forecasts?")
@@ -229,7 +229,7 @@ class ConversationalOutcomeTests(unittest.TestCase):
         self.assertAlmostEqual(split["user"]["mean_brier"], 0.81)
         self.assertAlmostEqual(split["openai"]["mean_brier"], 0.01)
 
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_named_older_target_is_in_bounded_conversation_context(self, compose):
         older = add_objective(self.store, TARGET)
         for index in range(6):

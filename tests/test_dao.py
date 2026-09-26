@@ -4,16 +4,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pioneer.calibration import add_forecast, calibration_report, forecast_records, resolve_forecast
-from pioneer.decision import DecisionError, analyze
-from pioneer.history import MAX_EVIDENCE, MAX_RECENT_CHARS, MAX_TOTAL_CHARS, recent_messages, retrieve_history
-from pioneer.objectives import objective_records, outcome_report
-from pioneer.pipeline import (_last_jev_assessment, _reported_outcome,
+from dao.calibration import add_forecast, calibration_report, forecast_records, resolve_forecast
+from dao.decision import DecisionError, analyze
+from dao.history import MAX_EVIDENCE, MAX_RECENT_CHARS, MAX_TOTAL_CHARS, recent_messages, retrieve_history
+from dao.objectives import objective_records, outcome_report
+from dao.pipeline import (_last_jev_assessment, _reported_outcome,
                               _visible_forecast_probability, run_turn)
-from pioneer.providers import (SYSTEM_INSTRUCTIONS, STATE_INSTRUCTIONS, ProviderError,
+from dao.providers import (SYSTEM_INSTRUCTIONS, STATE_INSTRUCTIONS, ProviderError,
                                HistoryReview, TurnPlan, ask_openai, assess_jev,
                                compose_turn, review_history, triage_jev)
-from pioneer.state import Store, StoreError
+from dao.state import Store, StoreError
 
 
 class StoreTests(unittest.TestCase):
@@ -75,7 +75,7 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(StoreError):
             self.store.commit("note", {"text": "stale"}, expected_head="0" * 64)
         object_id = self.store.commit("note", {"text": "test"})
-        path = Path(self.temp.name) / ".pioneer" / "objects" / f"{object_id}.json"
+        path = Path(self.temp.name) / ".dao" / "objects" / f"{object_id}.json"
         path.write_text('{"tampered":true}', encoding="utf-8")
         with self.assertRaises(StoreError):
             self.store.verify()
@@ -143,7 +143,7 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn("don't be agreeable", instructions)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_openai_uses_branch_messages_and_records_usage(self, post):
         post.return_value = {"id": "resp_1", "model": "test-model", "output": [
             {"content": [{"type": "output_text", "text": "Hello"}]}],
@@ -155,7 +155,7 @@ class ProviderTests(unittest.TestCase):
         self.assertFalse(post.call_args.args[2]["store"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_jev_schema_and_probability_validation(self, post):
         post.return_value = {"model": "jev-test", "answers": {
             name: {"type": "noul", "noul": 0.5}
@@ -170,7 +170,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(caught.exception.usage["input_tokens"], 50)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_integrated_jev_receives_branch_decision_state(self, post):
         post.return_value = {"model": "jev-test", "answers": {
             name: {"type": "noul", "noul": 0.7}
@@ -188,7 +188,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result["scores"]["assumption_tension"], 0.7)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_integrated_jev_asks_about_recent_tension(self, post):
         post.return_value = {"model": "jev-test", "answers": {
             name: {"type": "noul", "noul": 0.6}
@@ -201,7 +201,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(request["state"]["recent_user_messages"], ["Old 2", "Old 3", "Old 4", "Old 5"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_integrated_jev_omits_tension_question_without_prior_statements(self, post):
         post.return_value = {"model": "jev-test", "answers": {
             name: {"type": "noul", "noul": 0.6}
@@ -212,7 +212,7 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn("assumption_tension", request["questions"])
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_structured_turn_contract(self, post):
         state = self._state(
             decision_requested=True, missing=["state probabilities"],
@@ -234,7 +234,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(state_input["finished_assistant_reply"], "Tell me the states.")
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_structured_forecast_fields_and_calibration_context(self, post):
         context = {"status": "active", "goal": "Launch timing", "options": [], "known": [],
                    "uncertain": [], "provisional_view": "Wait", "next_questions": []}
@@ -258,7 +258,7 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(invalid.state_error)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_structured_desired_and_actual_outcomes(self, post):
         context = {"status": "none", "goal": "", "options": [], "known": [],
                    "uncertain": [], "provisional_view": "", "next_questions": []}
@@ -286,7 +286,7 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(invalid.state_error)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_older_history_is_input_data_without_same_turn_challenge(self, post):
         context = {"status": "active", "goal": "Launch", "options": [], "known": [],
                    "uncertain": [], "provisional_view": "Wait", "next_questions": []}
@@ -304,7 +304,7 @@ class ProviderTests(unittest.TestCase):
         self.assertIsNone(plan.history_conflict)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_history_review_is_separate_and_attributes_the_quoted_speaker(self, post):
         evidence = [{"commit": "a" * 64, "role": "assistant", "provider": "openai",
                      "quote": "I thought the pilot would take one week."}]
@@ -327,7 +327,7 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("conflict", payload["text"]["format"]["schema"]["required"])
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_unusable_openai_response_exposes_returned_usage(self, post):
         post.return_value = {"id": "resp_bad", "model": "test-model", "output": [
             {"content": []}],
@@ -347,7 +347,7 @@ class PipelineTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(self.temp.name)
         self.store.init()
-        self.review_patcher = patch("pioneer.pipeline.review_history")
+        self.review_patcher = patch("dao.pipeline.review_history")
         self.review = self.review_patcher.start()
         self.addCleanup(self.review_patcher.stop)
         self.review.return_value = HistoryReview(None, "test", 3, 2, "history_1")
@@ -356,7 +356,7 @@ class PipelineTests(unittest.TestCase):
         self.temp.cleanup()
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "", "TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.pipeline.assess_jev")
+    @patch("dao.pipeline.assess_jev")
     def test_missing_openai_key_does_not_spend_on_jev(self, jev):
         with self.assertRaisesRegex(ProviderError, "OPENAI_API_KEY"):
             run_turn(self.store, "Should I launch tomorrow?")
@@ -364,8 +364,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.store.usage(), [])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.pipeline.compose_turn")
-    @patch("pioneer.pipeline.assess_jev")
+    @patch("dao.pipeline.compose_turn")
+    @patch("dao.pipeline.assess_jev")
     def test_one_turn_integrates_jev_attention_analysis_and_usage(self, jev, compose):
         case = {"states": {"good": 0.5, "bad": 0.5}, "actions": {
             "invest": {"outcomes": {"good": 10, "bad": -10}},
@@ -403,11 +403,11 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("wait", json.dumps(checked, sort_keys=True))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.pipeline.compose_turn")
-    @patch("pioneer.pipeline.assess_jev")
+    @patch("dao.pipeline.compose_turn")
+    @patch("dao.pipeline.assess_jev")
     def test_ordinary_chat_skips_optional_jev_call(self, jev, compose):
         compose.return_value = TurnPlan("Hello.", False, None, [], "test", 8, 3, "r")
-        outcome = run_turn(self.store, "Hello, Pioneer.")
+        outcome = run_turn(self.store, "Hello, Dao.")
         jev.assert_not_called()
         self.assertEqual(outcome.text, "Hello.")
         self.assertEqual(outcome.notices, ())
@@ -417,7 +417,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(self.store.usage()), 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_ordinary_recorded_wording_is_not_treated_as_a_persistence_claim(self, compose):
         reply = "We recorded 80 users on Friday. That gives us a useful baseline."
         compose.return_value = TurnPlan(reply, False, None, [], "test", 10, 5, "r")
@@ -429,7 +429,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("notices", payload)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_explicit_recall_recovers_checked_decision_after_neutral_turn(self, compose):
         case = {"states": {"good": 0.5, "bad": 0.5}, "actions": {
             "invest": {"outcomes": {"good": 10, "bad": -10}},
@@ -460,7 +460,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(assistant_history, ["I can compare those choices.", "You're welcome."])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_recall_chooses_named_checked_decision_over_newer_other_topic(self, compose):
         launch_case = {"title": "Launch timing", "states": {"ready": 1.0}, "actions": {
             "launch": {"outcomes": {"ready": 8}}, "hold": {"outcomes": {"ready": 0}}}}
@@ -484,7 +484,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("checked calculation favors hold", checked)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_local_record_is_not_replayed_as_assistant_speech(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
@@ -504,7 +504,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("Target saved", sent[1]["content"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_conversation_compares_target_progress_and_final_result(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
@@ -545,7 +545,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(compose.call_args.kwargs["calibration"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_retrospective_target_and_actual_share_one_turn(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
@@ -563,7 +563,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(outcome_report(self.store)["missed_count"], 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_date_before_value_and_deadline_followup_save_target_and_result(self, compose):
         objective = {"goal": "Grow engagement", "metric": "weekly active users",
                      "kind": "numeric", "desired": 100, "direction": "at_least",
@@ -588,7 +588,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("objective", self.store.read_object(date_first.commit)["payload"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_different_metric_cannot_be_saved_as_target_result(self, compose):
         objective = {"goal": "Grow engagement", "metric": "weekly active users",
                      "kind": "numeric", "desired": 100, "direction": "at_least",
@@ -616,7 +616,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("actual", self.store.read_object(mixed.commit)["payload"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_rejected_target_preserves_openai_claim_and_marks_missing_record(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
@@ -633,7 +633,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(payload["notices"], list(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_unproposed_target_claim_is_preserved_with_separate_check(self, compose):
         reply = "I have already saved your target. We can decide timing next."
         compose.return_value = TurnPlan(
@@ -647,7 +647,7 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(any("target" in item.casefold() for item in outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_false_forecast_claim_stays_attributed_while_target_check_remains(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
@@ -668,7 +668,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(payload["notices"], list(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_conflicting_save_description_remains_authored_with_correct_record(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
@@ -690,7 +690,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("200 users", records)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_truthful_confirmation_of_prior_target_is_not_filtered(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
@@ -713,7 +713,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(objective_records(self.store)), 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_old_target_does_not_confirm_false_new_save_claim(self, compose):
         old_target = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                       "desired": 100, "direction": "at_least", "unit": "users",
@@ -746,7 +746,7 @@ class PipelineTests(unittest.TestCase):
                             for item in third.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_old_target_does_not_verify_revised_target_history_claim(self, compose):
         old_target = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                       "desired": 100, "direction": "at_least", "unit": "users",
@@ -763,7 +763,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(objective_records(self.store)), 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_short_answer_to_one_measure_question_records_result(self, compose):
         objective = {"goal": "Launch", "metric": "paid users", "kind": "numeric",
                      "desired": 100, "direction": "at_least", "unit": "users",
@@ -780,7 +780,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.store.read_object(result.commit)["payload"]["actual"]["value"], 70)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_binary_result_after_by_deadline_is_not_a_success(self, compose):
         objective = {"goal": "We launch by Friday", "metric": "completion", "kind": "binary",
                      "desired": True, "direction": "exact", "unit": "", "deadline": "by Friday", "action": ""}
@@ -797,7 +797,7 @@ class PipelineTests(unittest.TestCase):
                       {"id": "a" * 64, "event": "We launch by Friday", "deadline": "by Friday"}), False)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_conversation_binary_target_requires_reported_result(self, compose):
         objective = {"goal": "Launch", "metric": "completion", "kind": "binary",
                      "desired": True, "direction": "exact", "unit": "",
@@ -820,7 +820,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(outcome_report(self.store)["met_count"], 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_conversation_records_and_scores_its_own_forecast(self, compose):
         context = {"status": "active", "goal": "Launch timing", "options": ["launch", "wait"],
                    "known": [], "uncertain": [], "provisional_view": "Wait", "next_questions": []}
@@ -831,7 +831,7 @@ class PipelineTests(unittest.TestCase):
         first = run_turn(self.store, "What are the chances we launch by Friday?")
         saved = self.store.read_object(first.commit)["payload"]["forecast"]
         self.assertEqual((saved["probability"], saved["source"], saved["topic"]),
-                         (0.7, "pioneer", "Launch timing"))
+                         (0.7, "dao", "Launch timing"))
         self.assertEqual(first.text, "I estimate a 70% chance we launch by Friday.")
         self.assertIn("Forecast saved: 70.0%", "\n".join(first.notices))
 
@@ -873,7 +873,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(compose.call_args.kwargs["calibration"]["count"], 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_forecast_requires_matching_visible_event_and_deadline(self, compose):
         forecast = {"event": "We launch by Friday", "probability": 0.7, "deadline": "Friday"}
         for reply in ("Rain is 70%, but launch by Friday is 30%.",
@@ -899,10 +899,10 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("forecast", self.store.read_object(result.commit)["payload"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_late_report_does_not_become_a_forecast_success(self, compose):
         forecast_id = add_forecast(self.store, "Project Beta launch by Friday", 0.7,
-                                   "Friday", source="pioneer")
+                                   "Friday", source="dao")
         report = "Project Beta launched Saturday, not Friday."
         compose.return_value = TurnPlan("That missed Friday.", False, None, [], "test", 10, 5,
                                         "r", resolution={"forecast_id": forecast_id,
@@ -932,11 +932,11 @@ class PipelineTests(unittest.TestCase):
             "Project Alpha launched Friday; Project Beta did not launch Friday.", forecast), False)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_similar_forecast_history_reaches_future_decision(self, compose):
         for index in range(5):
             forecast_id = add_forecast(self.store, f"Launch trial {index}", 0.6,
-                                       "Friday", topic="Launch timing", source="pioneer", model="test")
+                                       "Friday", topic="Launch timing", source="dao", model="test")
             resolve_forecast(self.store, forecast_id, index < 3)
         context = {"status": "active", "goal": "Launch timing", "options": ["launch", "wait"],
                    "known": [], "uncertain": [], "provisional_view": "Wait", "next_questions": []}
@@ -951,11 +951,11 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Limited evidence", evidence["caveat"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_forecast_question_receives_only_matching_topic_history(self, compose):
         for index in range(5):
             forecast_id = add_forecast(self.store, f"Launch trial {index}", 0.6,
-                                       "Friday", topic="Launch timing", source="pioneer")
+                                       "Friday", topic="Launch timing", source="dao")
             resolve_forecast(self.store, forecast_id, index < 3)
         compose.return_value = TurnPlan("I need the current evidence to estimate that.",
                                         False, None, [], "test", 10, 5, "r")
@@ -965,11 +965,11 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(compose.call_args.kwargs["calibration"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_calibration_history_does_not_cross_project_subjects(self, compose):
         for index in range(5):
             forecast_id = add_forecast(self.store, f"Project Alpha launch trial {index}", 0.6,
-                                       "Friday", topic="Project Alpha launch", source="pioneer")
+                                       "Friday", topic="Project Alpha launch", source="dao")
             resolve_forecast(self.store, forecast_id, index < 3)
         compose.return_value = TurnPlan("Let's estimate Beta separately.", False, None, [],
                                         "test", 10, 5, "r")
@@ -977,8 +977,8 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(compose.call_args.kwargs["calibration"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.pipeline.compose_turn")
-    @patch("pioneer.pipeline.assess_jev")
+    @patch("dao.pipeline.compose_turn")
+    @patch("dao.pipeline.assess_jev")
     def test_jev_attention_carries_forward_with_same_branch_goal(self, jev, compose):
         context = {"status": "active", "goal": "Launch timing", "options": ["launch", "pilot"],
                    "known": [], "uncertain": ["deadline"], "provisional_view": "Pilot first",
@@ -996,8 +996,8 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("urgency", previous["attention"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.pipeline.compose_turn")
-    @patch("pioneer.pipeline.assess_jev")
+    @patch("dao.pipeline.compose_turn")
+    @patch("dao.pipeline.assess_jev")
     def test_new_decision_does_not_inherit_unrelated_jev_state(self, jev, compose):
         launch = {"status": "active", "goal": "Launch timing", "options": ["launch", "pilot"],
                   "known": [], "uncertain": [], "provisional_view": "Pilot first", "next_questions": []}
@@ -1035,8 +1035,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(_last_jev_assessment(self.store, "alternate", context)["scores"]["time_sensitive"], 0.1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.pipeline.compose_turn")
-    @patch("pioneer.pipeline.assess_jev")
+    @patch("dao.pipeline.compose_turn")
+    @patch("dao.pipeline.assess_jev")
     def test_jev_failure_keeps_conversation_and_records_usage(self, jev, compose):
         jev.side_effect = ProviderError("Jev unavailable", usage={"provider": "jev", "model": "jev-test",
                                                                  "input_tokens": 7, "output_tokens": 1})
@@ -1048,7 +1048,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([record["provider"] for record in self.store.usage()], ["jev", "openai"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_unprovided_number_blocks_calculation(self, compose):
         case = {"states": {"good": 0.9, "bad": 0.1}, "actions": {"act": {
             "outcomes": {"good": 10, "bad": -10}}}}
@@ -1064,7 +1064,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(self.store.usage()), 1)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_wait_question_never_becomes_act_only_calculation(self, compose):
         case = {"states": {"good": 0.5, "bad": 0.5}, "actions": {
             "invest": {"outcomes": {"good": 10, "bad": -10}},
@@ -1077,7 +1077,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_wait_question_from_prior_turn_still_guards_calculation(self, compose):
         context = {"status": "active", "goal": "Investment timing", "options": ["invest", "hold"],
                    "known": [], "uncertain": ["outcome"], "provisional_view": "Wait for information",
@@ -1096,7 +1096,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_new_goal_cannot_borrow_old_numbers(self, compose):
         old = {"status": "active", "goal": "Old project", "options": ["go", "hold"],
                "known": [], "uncertain": [], "provisional_view": "Unsure", "next_questions": []}
@@ -1115,7 +1115,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_chat_sends_recent_turns_with_working_context(self, compose):
         context = {"status": "active", "goal": "Timing", "options": [], "known": [],
                    "uncertain": [], "provisional_view": "Unsure", "next_questions": []}
@@ -1130,7 +1130,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(compose.call_args.kwargs["context"], context)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_history_review_cites_prior_user_without_rewriting_reply(self, compose):
         older = "We must finish legal review before the public launch."
         source = self.store.commit("turn", {"user": older, "assistant": "Understood."})
@@ -1156,7 +1156,7 @@ class PipelineTests(unittest.TestCase):
                          ["history_review"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_history_review_cites_prior_assistant_with_correct_role(self, compose):
         source = self.store.commit("turn", {
             "user": "How long might a pilot take?", "assistant": "The pilot might take one week.",
@@ -1178,7 +1178,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.store.read_object(outcome.commit)["payload"]["assistant"], reply)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_fabricated_history_citation_is_not_shown(self, compose):
         self.store.commit("turn", {"user": "Wait for legal review before launch.", "assistant": "Okay."})
         for index in range(20):
@@ -1194,7 +1194,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("history_challenge", self.store.read_object(outcome.commit)["payload"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_history_quote_cannot_be_attributed_to_wrong_speaker(self, compose):
         source = self.store.commit("turn", {
             "user": "We should wait for legal review.",
@@ -1210,7 +1210,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("history_challenge", self.store.read_object(outcome.commit)["payload"])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_history_review_failure_preserves_reply_and_records_usage(self, compose):
         self.store.commit("turn", {"user": "We discussed a pilot.", "assistant": "A week may suffice."})
         reply = "The pilot may take longer than a week."
@@ -1273,7 +1273,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(evidence[0]["commit"], first)
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_omitted_oversize_turn_does_not_supply_decision_numbers(self, compose):
         self.store.commit("turn", {"user": "For launch, good is 90% and bad 10%.",
                                    "assistant": "A" * (MAX_RECENT_CHARS + 1)})
@@ -1292,7 +1292,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_retrieved_old_numbers_cannot_authorize_a_calculation(self, compose):
         self.store.commit("turn", {"user": "For launch, good is 90%, bad 10%; launch pays 10 or -10.",
                                    "assistant": "Understood."})
@@ -1311,7 +1311,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Proposed calculation was not verified", "\n".join(outcome.notices))
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "", "OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_failed_openai_turn_still_records_returned_usage(self, post):
         post.return_value = {"id": "resp_bad", "model": "test-model", "output": [],
                              "usage": {"input_tokens": 18, "output_tokens": 2}}
@@ -1322,7 +1322,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.store.log()[0][1]["kind"], "note")
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_provisional_reply_is_preserved_and_context_carried_forward(self, compose):
         context = {"status": "active", "goal": "Launch timing", "options": ["launch", "pilot"],
                    "known": ["Launch is hard to undo"], "uncertain": ["Pilot duration"],
@@ -1344,7 +1344,7 @@ class PipelineTests(unittest.TestCase):
                          "Pilot takes a week")
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": ""})
-    @patch("pioneer.pipeline.compose_turn")
+    @patch("dao.pipeline.compose_turn")
     def test_counterfactual_creates_branch_and_keeps_original(self, compose):
         context = {"status": "active", "goal": "Launch timing", "options": ["launch", "pilot"],
                    "known": [], "uncertain": [], "provisional_view": "Pilot", "next_questions": []}
@@ -1371,8 +1371,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.store.usage(), [])
 
     @patch.dict("os.environ", {"TYPESAFE_API_KEY": "test"})
-    @patch("pioneer.pipeline.compose_turn", side_effect=ProviderError("OpenAI unavailable"))
-    @patch("pioneer.pipeline.assess_jev")
+    @patch("dao.pipeline.compose_turn", side_effect=ProviderError("OpenAI unavailable"))
+    @patch("dao.pipeline.assess_jev")
     def test_jev_usage_survives_later_openai_failure(self, jev, _compose):
         jev.return_value = {"model": "jev-test", "scores": {"decision_request": 0.9},
                                "input_tokens": 30, "output_tokens": 4}

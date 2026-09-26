@@ -43,7 +43,11 @@ def _atomic_write(path: Path, data: bytes) -> None:
 class Store:
     def __init__(self, root: str | Path = ".") -> None:
         self.root = Path(root).resolve()
-        self.data = self.root / ".pioneer"
+        current = self.root / ".dao"
+        legacy = self.root / ".pioneer"
+        # Continue an existing history in place: object IDs and branch pointers
+        # must not change merely because the application was renamed.
+        self.data = current if (current / "HEAD").is_file() or not (legacy / "HEAD").is_file() else legacy
 
     @property
     def exists(self) -> bool:
@@ -51,7 +55,7 @@ class Store:
 
     def require(self) -> None:
         if not self.exists:
-            raise StoreError(f"No Pioneer workspace in {self.root}. Run 'pioneer init' first.")
+            raise StoreError(f"No Dao workspace in {self.root}. Run 'dao init' first.")
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -70,10 +74,10 @@ class Store:
 
     def init(self) -> str:
         if self.exists:
-            raise StoreError("Pioneer workspace already exists here.")
+            raise StoreError("Dao workspace already exists here.")
         (self.data / "objects").mkdir(parents=True, exist_ok=True)
         (self.data / "refs").mkdir(parents=True, exist_ok=True)
-        root_id = self._write_object({"schema": 1, "parent": None, "kind": "root", "timestamp": _now(), "payload": {"title": "Pioneer"}})
+        root_id = self._write_object({"schema": 1, "parent": None, "kind": "root", "timestamp": _now(), "payload": {"title": "Dao"}})
         _atomic_write(self.data / "refs" / "main", (root_id + "\n").encode("ascii"))
         _atomic_write(self.data / "HEAD", b"main\n")
         return root_id

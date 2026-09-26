@@ -3,7 +3,7 @@
 import tempfile
 import unittest
 
-from pioneer.calibration import (
+from dao.calibration import (
     CalibrationError,
     add_forecast,
     calibration_context,
@@ -13,7 +13,7 @@ from pioneer.calibration import (
     resolve_forecast,
     validate_forecast,
 )
-from pioneer.state import Store, StoreError
+from dao.state import Store, StoreError
 
 
 class CalibrationTests(unittest.TestCase):
@@ -28,13 +28,13 @@ class CalibrationTests(unittest.TestCase):
     def test_forecast_validation_rejects_unscorable_or_unbounded_claims(self):
         value = {"event": "  The pilot ships  ", "probability": 0.7,
                  "deadline": "  2027-01-01  "}
-        self.assertEqual(validate_forecast(value, source="pioneer", topic=" Launch ", model="m"), {
+        self.assertEqual(validate_forecast(value, source="dao", topic=" Launch ", model="m"), {
             "event": "The pilot ships", "probability": 0.7, "deadline": "2027-01-01",
-            "topic": "Launch", "source": "pioneer", "model": "m",
+            "topic": "Launch", "source": "dao", "model": "m",
         })
         for bad in (True, float("nan"), float("inf"), -0.01, 1.01, 10 ** 1000, "70%"):
             with self.subTest(probability=bad), self.assertRaises(CalibrationError):
-                validate_forecast({**value, "probability": bad}, source="pioneer")
+                validate_forecast({**value, "probability": bad}, source="dao")
         for field, replacement in (("event", " "), ("deadline", ""),
                                    ("event", "x" * 501), ("deadline", "x" * 161)):
             with self.subTest(field=field, replacement=replacement[:12]), self.assertRaises(CalibrationError):
@@ -67,7 +67,7 @@ class CalibrationTests(unittest.TestCase):
         ]
         for event, probability, outcome in forecasts:
             ref = add_forecast(self.store, event, probability, "2027-01-01",
-                               topic="launch", source="pioneer", model="test-model")
+                               topic="launch", source="dao", model="test-model")
             resolve_forecast(self.store, ref, outcome)
         user_ref = add_forecast(self.store, "F", 0.9, "2027-01-01", source="user")
         resolve_forecast(self.store, user_ref, False)
@@ -102,7 +102,7 @@ class CalibrationTests(unittest.TestCase):
         first = self.store.commit("turn", {
             "user": "Will it happen?", "assistant": "I estimate 60%.",
             "forecast": validate_forecast({"event": "Shipment arrives", "probability": 0.6,
-                                           "deadline": "Friday"}, source="pioneer", topic="shipping"),
+                                           "deadline": "Friday"}, source="dao", topic="shipping"),
         })
         self.store.commit("turn", {
             "user": "It arrived", "assistant": "Recorded.",
@@ -112,7 +112,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertIsNone(calibration_context(self.store, "shipping"))
         for index in range(4):
             ref = add_forecast(self.store, f"Shipment {index} arrives", 0.6, "Friday",
-                               topic="shipping", source="pioneer")
+                               topic="shipping", source="dao")
             resolve_forecast(self.store, ref, index % 2 == 0)
         context = calibration_context(self.store, "Shipping")
         self.assertEqual(context["count"], 5)

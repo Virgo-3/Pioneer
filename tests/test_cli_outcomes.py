@@ -6,9 +6,9 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
-from pioneer.cli import _chat, main
-from pioneer.objectives import objective_records, outcome_report
-from pioneer.state import Store
+from dao.cli import _chat, main
+from dao.objectives import objective_records, outcome_report
+from dao.state import Store
 
 
 class OutcomeCommandTests(unittest.TestCase):
@@ -82,7 +82,7 @@ class OutcomeCommandTests(unittest.TestCase):
         self.assertEqual(len(objective_records(self.store)), 1)
         target_id = objective_records(self.store)[0]["id"]
         self.assertIn(target_id, output)
-        self.assertIn("No resolved Pioneer forecasts", output)
+        self.assertIn("No resolved Dao forecasts", output)
         self.assertIn("Use /observe ID | ACTUAL | WHEN", errors)
 
         output, errors = self.chat([f"/observe {target_id[:12]} | no | 2027-02-01",

@@ -6,7 +6,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from pioneer.providers import ProviderError, compose_turn, review_history
+from dao.providers import ProviderError, compose_turn, review_history
 
 
 def _response(payload: dict[str, object], *, input_tokens: int = 17) -> dict[str, object]:
@@ -20,7 +20,7 @@ def _response(payload: dict[str, object], *, input_tokens: int = 17) -> dict[str
 
 class ProviderReviewTests(unittest.TestCase):
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_history_review_uses_finished_reply_and_exact_source_data(self, post):
         evidence = [{"commit": "a" * 64, "role": "assistant", "quote": "The pilot has no cost."}]
         conflict = {"commit": "a" * 64, "role": "assistant", "quote": "pilot has no cost",
@@ -34,7 +34,7 @@ class ProviderReviewTests(unittest.TestCase):
         self.assertEqual((review.input_tokens, review.output_tokens, review.response_id),
                          (17, 9, "resp_review"))
         request = post.call_args.args[2]
-        self.assertEqual(request["text"]["format"]["name"], "pioneer_history_review")
+        self.assertEqual(request["text"]["format"]["name"], "dao_history_review")
         self.assertTrue(request["text"]["format"]["strict"])
         self.assertFalse(request["store"])
         review_input = json.loads(request["input"][0]["content"])
@@ -44,14 +44,14 @@ class ProviderReviewTests(unittest.TestCase):
         self.assertIn("does not establish what is true", request["instructions"])
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_no_tension_returns_no_conflict(self, post):
         post.return_value = _response({"conflict": None})
         review = review_history("I still prefer a pilot.", [], user_text="What now?")
         self.assertIsNone(review.conflict)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_invalid_review_retains_usage_for_accounting(self, post):
         post.return_value = _response({"conflict": {"commit": "a" * 64, "role": "system",
                                                     "quote": "quoted", "challenge": "Why?"}},
@@ -62,7 +62,7 @@ class ProviderReviewTests(unittest.TestCase):
         self.assertEqual(caught.exception.usage["response_id"], "resp_review")
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test"})
-    @patch("pioneer.providers._post")
+    @patch("dao.providers._post")
     def test_turn_separates_native_reply_from_state(self, post):
         context = {"status": "none", "goal": "", "options": [], "known": [], "uncertain": [],
                    "provisional_view": "", "next_questions": []}

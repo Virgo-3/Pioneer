@@ -1,4 +1,4 @@
-"""Pioneer's command-line and interactive terminal interface."""
+"""Dao's command-line and interactive terminal interface."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .adjudication import add_evidence, case_record, cases, make_finding, open_case
 from .calibration import add_forecast, calibration_report, open_forecasts, resolve_forecast
 from .decision import DecisionError, analyze
 from .objectives import (add_objective, compare_objective, objective_records,
@@ -23,10 +24,10 @@ from .state import Store, StoreError
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pioneer", description="Branchable conversational AI terminal")
-    parser.add_argument("--repo", default=".", help="Pioneer workspace directory (default: current directory)")
+    parser = argparse.ArgumentParser(prog="dao", description="Branchable, record-based adjudication")
+    parser.add_argument("--repo", default=".", help="Dao workspace directory (default: current directory)")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("init", help="Initialize a Pioneer workspace")
+    sub.add_parser("init", help="Initialize a Dao workspace")
     chat = sub.add_parser("chat", help="Open the interactive terminal")
     chat.add_argument("--model", help="OpenAI model for this session")
     ask = sub.add_parser("ask", help="Run one cohesive conversation turn")
@@ -49,6 +50,27 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="Show current branch and commit")
     usage = sub.add_parser("usage", help="Show recorded token usage")
     usage.add_argument("--prices", help="Optional JSON price card for estimated USD cost")
+    case = sub.add_parser("case", help="Open, list, or inspect review cases")
+    case_actions = case.add_subparsers(dest="case_action", required=True)
+    opened = case_actions.add_parser("open", help="Open a question for review")
+    opened.add_argument("question", nargs="+", help="Question in your own words")
+    opened.add_argument("--note", default="", help="Optional background")
+    case_actions.add_parser("list", help="List cases on this branch")
+    shown = case_actions.add_parser("show", help="Show the evidence and findings for one case")
+    shown.add_argument("id", help="Case ID or unique prefix")
+    evidence = sub.add_parser("evidence", help="Add a record to a case")
+    evidence.add_argument("id", help="Case ID or unique prefix")
+    evidence.add_argument("text", nargs="+", help="What the record says")
+    evidence.add_argument("--source", help="Cited turn ID or unique prefix")
+    evidence.add_argument("--role", choices=("user", "assistant"), help="Speaker in cited turn")
+    evidence.add_argument("--quote", help="Exact words from the cited turn")
+    finding = sub.add_parser("finding", help="Record a reasoned conclusion")
+    finding.add_argument("id", help="Case ID or unique prefix")
+    finding.add_argument("conclusion", choices=("supported", "refuted", "disputed", "unresolved"))
+    finding.add_argument("rationale", nargs="+", help="Reason in your own words")
+    finding.add_argument("--support", action="append", default=[], help="Supporting evidence ID; repeat as needed")
+    finding.add_argument("--oppose", action="append", default=[], help="Opposing evidence ID; repeat as needed")
+    finding.add_argument("--supersedes", help="Current finding ID when revising a conclusion")
     decide = sub.add_parser("decide", help="Analyze and save a decision case from JSON")
     decide.add_argument("file")
     decide.add_argument("--no-save", action="store_true", help="Analyze without creating a commit")
@@ -87,7 +109,7 @@ def _parser() -> argparse.ArgumentParser:
     calibration.add_argument("--goal", help="Show only one goal")
     accuracy = sub.add_parser("forecast-accuracy", help="Compare forecast probabilities with reported events")
     accuracy.add_argument("--topic", help="Show only one forecast topic")
-    accuracy.add_argument("--source", choices=("pioneer", "user", "all"), default="pioneer")
+    accuracy.add_argument("--source", choices=("dao", "user", "all"), default="dao")
     sub.add_parser("verify", help="Check stored object hashes, refs, and ledger links")
     return parser
 
@@ -97,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     store = Store(args.repo)
     try:
         if args.command == "init":
-            print(f"Initialized Pioneer at {store.root} ({store.init()[:12]}).")
+            print(f"Initialized Dao at {store.root} ({store.init()[:12]}).")
         elif args.command == "chat":
             _chat(store, args.model)
         elif args.command == "ask":
@@ -132,6 +154,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{store.current_branch()} @ {store.resolve()[:12]}  ({len(store.log()) - 1} commits)")
         elif args.command == "usage":
             _usage(store, args.prices)
+        elif args.command == "case":
+            if args.case_action == "open":
+                _open_case(store, " ".join(args.question), args.note)
+            elif args.case_action == "list":
+                _list_cases(store)
+            else:
+                _show_case(store, args.id)
+        elif args.command == "evidence":
+            _add_evidence(store, args.id, " ".join(args.text),
+                          source=args.source, role=args.role, quote=args.quote)
+        elif args.command == "finding":
+            _make_finding(store, args.id, args.conclusion, " ".join(args.rationale),
+                          support=args.support, oppose=args.oppose, supersedes=args.supersedes)
         elif args.command == "decide":
             _decide(store, args.file, save=not args.no_save)
         elif args.command == "triage":
@@ -163,16 +198,80 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Verified {counts['objects']} objects, {counts['branches']} branches, {counts['usage_entries']} usage entries.")
         return 0
     except (StoreError, ProviderError, DecisionError, OSError, json.JSONDecodeError) as exc:
-        print(f"Pioneer: {exc}", file=sys.stderr)
+        print(f"Dao: {exc}", file=sys.stderr)
         return 1
+
+
+def _open_case(store: Store, question: str, note: str = "") -> None:
+    object_id = open_case(store, question, note=note)
+    print(f"Opened case {object_id[:12]}: {question.strip()}")
+
+
+def _list_cases(store: Store) -> None:
+    records = cases(store)
+    if not records:
+        print("No cases on this branch. Use 'dao case open QUESTION'.")
+        return
+    for record in records:
+        latest = record["current_finding"]
+        status = latest["conclusion"] if latest else "unresolved"
+        print(f"{record['id'][:12]}  {status:<10}  {record['question']}")
+
+
+def _show_case(store: Store, case_id: str) -> None:
+    record = case_record(store, case_id)
+    print(f"Case {record['id']} | {record['question']}")
+    if record["note"]:
+        print(f"Background: {record['note']}")
+    print("Evidence:")
+    if not record["evidence"]:
+        print("  None recorded.")
+    for item in record["evidence"]:
+        source = item["citation"]
+        print(f"  {item['id'][:12]}  {item['text']}")
+        if source:
+            print(f"    Quoted {source['role']} at {source['commit'][:12]}: "
+                  f"{json.dumps(source['quote'], ensure_ascii=False)}")
+        else:
+            print("    User record; no linked source.")
+    print("Findings:")
+    if not record["findings"]:
+        print("  No finding yet.")
+    for item in record["findings"]:
+        marker = "current" if item["id"] == record["current_finding"]["id"] else "superseded"
+        print(f"  {item['id'][:12]}  {item['conclusion']} ({marker})")
+        print(f"    {item['rationale']}")
+        print(f"    Supports: {', '.join(value[:12] for value in item['support']) or 'none'}")
+        print(f"    Opposes: {', '.join(value[:12] for value in item['oppose']) or 'none'}")
+    print("A matching quote confirms its source, not the truth of the claim.")
+
+
+def _add_evidence(store: Store, case_id: str, text: str, *,
+                  source: str | None = None, role: str | None = None,
+                  quote: str | None = None) -> None:
+    if any(value is not None for value in (source, role, quote)):
+        if not all(value is not None for value in (source, role, quote)):
+            raise StoreError("Use --source, --role, and --quote together.")
+        citation = {"commit": source, "role": role, "quote": quote}
+    else:
+        citation = None
+    object_id = add_evidence(store, case_id, text, citation=citation)
+    print(f"Recorded evidence {object_id[:12]}.")
+
+
+def _make_finding(store: Store, case_id: str, conclusion: str, rationale: str, *,
+                  support: list[str], oppose: list[str], supersedes: str | None = None) -> None:
+    object_id = make_finding(store, case_id, conclusion, rationale, support=support,
+                             oppose=oppose, supersedes=supersedes)
+    print(f"Recorded {conclusion} finding {object_id[:12]}.")
 
 
 def _ask(store: Store, text: str, model: str | None = None, *, interactive: bool = False) -> None:
     outcome = run_turn(store, text, model=model)
     if outcome.branched_from:
-        print(f"Pioneer branch: Exploring on {outcome.branch}; {outcome.branched_from} is still available.")
+        print(f"Dao branch: Exploring on {outcome.branch}; {outcome.branched_from} is still available.")
     if outcome.text:
-        speaker = "Pioneer" if outcome.model == "local" else "OpenAI"
+        speaker = "Dao" if outcome.model == "local" else "OpenAI"
         sys.stdout.write(f"{speaker}: {outcome.text}")
         if not outcome.text.endswith("\n"):
             print()
@@ -180,9 +279,9 @@ def _ask(store: Store, text: str, model: str | None = None, *, interactive: bool
     if outcome.history_challenge:
         challenge = outcome.history_challenge
         source = ("You" if challenge["role"] == "user" else
-                  "Pioneer" if challenge.get("provider") == "local" else "OpenAI")
+                  "Dao" if challenge.get("provider") == "local" else "OpenAI")
         quote = json.dumps(challenge["quote"], ensure_ascii=False)
-        print(f"Pioneer history check: Earlier {source} at {challenge['commit'][:12]}: {quote}")
+        print(f"Dao history check: Earlier {source} at {challenge['commit'][:12]}: {quote}")
         print(f"OpenAI review asks: {challenge['challenge']}")
 
 
@@ -191,11 +290,11 @@ def _print_checks(notices: tuple[str, ...]) -> None:
         return
     if len(notices) == 1:
         lines = notices[0].splitlines() or [""]
-        print(f"Pioneer check: {lines[0]}")
+        print(f"Dao check: {lines[0]}")
         for line in lines[1:]:
             print(f"  {line}")
         return
-    print("Pioneer checks:")
+    print("Dao checks:")
     for notice in notices:
         lines = notice.splitlines() or [""]
         print(f"  - {lines[0]}")
@@ -219,7 +318,7 @@ def _show_source(store: Store, prefix: str) -> None:
     payload = obj["payload"]
     print(f"Source {object_id} on {store.current_branch()}:")
     print(f"You: {payload['user']}")
-    speaker = "Pioneer" if payload.get("provider") == "local" else "OpenAI"
+    speaker = "Dao" if payload.get("provider") == "local" else "OpenAI"
     print(f"{speaker}: {payload['assistant']}")
 
 
@@ -543,21 +642,21 @@ def _resolve_forecast(store: Store, ref: str, outcome: str) -> None:
     print(f"Resolution entry: {resolution_id}")
 
 
-def _print_forecast_accuracy(store: Store, *, source: str = "pioneer", topic: str | None = None) -> None:
+def _print_forecast_accuracy(store: Store, *, source: str = "dao", topic: str | None = None) -> None:
     report = calibration_report(store, source=source, topic=topic)
     count = report["count"]
-    label = "Pioneer" if source == "pioneer" else "your" if source == "user" else "all"
+    label = "Dao" if source == "dao" else "your" if source == "user" else "all"
     if count == 0:
-        subject = ("Pioneer forecasts" if source == "pioneer" else
+        subject = ("Dao forecasts" if source == "dao" else
                    "forecasts you entered" if source == "user" else "forecasts")
         print(f"No resolved {subject}" + (f" for {topic}" if topic else "") +
               f" on {store.current_branch()} yet.")
-        if source == "pioneer":
+        if source == "dao":
             print("For your forecasts, use 'forecast-accuracy --source user' or '/forecast-accuracy user'.")
         return
     print(f"Forecast accuracy on {store.current_branch()} | {label} forecasts" +
           (f" | topic: {topic}" if topic else ""))
-    print("  Outcomes were reported by a user; Pioneer has not verified them.")
+    print("  Outcomes were reported by a user; Dao has not verified them.")
     print(f"  Resolved: {count}")
     print(f"  Average forecast: {report['mean_predicted']:.1%}")
     print(f"  Reported event rate: {report['observed_rate']:.1%}")
@@ -691,6 +790,9 @@ def _latest_jev_guidance(store: Store, goal: str) -> dict[str, Any] | None:
 
 
 def _topic(store: Store, ref: str | None = None) -> str | None:
+    reviewed = cases(store, ref)
+    if reviewed:
+        return _brief(reviewed[-1]["question"])
     for _, obj in store.log(ref):
         payload = obj["payload"]
         if obj["kind"] == "turn":
@@ -707,6 +809,13 @@ def _orientation(store: Store) -> None:
     branch = store.current_branch()
     topic = _topic(store)
     print(f"On {branch}" + (f" | {topic}" if topic else " | new conversation"))
+    reviewed = cases(store)
+    if reviewed:
+        active = reviewed[-1]
+        finding = active["current_finding"]
+        print(f"Review case {active['id'][:12]}: "
+              f"{finding['conclusion'] if finding else 'awaiting a finding'} "
+              f"({len(active['evidence'])} evidence records)")
     context = _latest_context(store)
     if context and context.get("provisional_view"):
         print(f"Current view: {_brief(context['provisional_view'])}")
@@ -715,7 +824,7 @@ def _orientation(store: Store) -> None:
 def _print_context(store: Store) -> None:
     context = _latest_context(store)
     if context is None:
-        print("No working context on this branch yet. Tell Pioneer what you are considering.")
+        print("No working context on this branch yet. Tell Dao what you are considering.")
         return
     print(f"Working context on {store.current_branch()}:")
     for key, label in (("goal", "Goal"), ("provisional_view", "Current view")):
@@ -773,9 +882,31 @@ def _reset(store: Store, branch: str, *, clear: bool = False) -> None:
         print(f"{branch} was already at its starting point.")
 
 
+def _chat_evidence(store: Store, argument: str) -> None:
+    fields = [field.strip() for field in argument.split("|")]
+    if len(fields) not in {2, 5} or not all(fields):
+        raise StoreError("Use /evidence CASE_ID | TEXT [| TURN_ID | user|assistant | EXACT_QUOTE].")
+    _add_evidence(store, fields[0], fields[1],
+                  source=fields[2] if len(fields) == 5 else None,
+                  role=fields[3] if len(fields) == 5 else None,
+                  quote=fields[4] if len(fields) == 5 else None)
+
+
+def _chat_finding(store: Store, argument: str) -> None:
+    fields = [field.strip() for field in argument.split("|")]
+    if len(fields) < 3 or len(fields) > 6 or not all(fields[:3]):
+        raise StoreError("Use /finding CASE_ID | STATUS | REASON [| SUPPORT_IDS | OPPOSE_IDS | SUPERSEDES_ID].")
+    def ids(value: str) -> list[str]:
+        return [item for item in re.split(r"[\s,]+", value) if item]
+    _make_finding(store, fields[0], fields[1].lower(), fields[2],
+                  support=ids(fields[3]) if len(fields) > 3 else [],
+                  oppose=ids(fields[4]) if len(fields) > 4 else [],
+                  supersedes=fields[5] if len(fields) > 5 and fields[5] else None)
+
+
 def _chat(store: Store, model: str | None) -> None:
     store.require()
-    print("Pioneer | Talk through a choice, or type /help for commands.")
+    print("Dao | Review a question with records, or type /help for commands.")
     _orientation(store)
     if not os.environ.get("OPENAI_API_KEY"):
         print("Set OPENAI_API_KEY for conversation. Complete decision JSON still works locally.")
@@ -795,8 +926,14 @@ def _chat(store: Store, model: str | None) -> None:
                 return
             if command == "/help":
                 if not argument:
-                    print("Talk naturally about your goals, choices, and results. Pioneer checks follow replies when needed.")
+                    print("Talk naturally, then record evidence and a reasoned finding on the active branch.")
                     print("Commands:")
+                    print("  /case QUESTION          Open a question for review")
+                    print("  /cases                  List review cases")
+                    print("  /review CASE_ID         Read evidence and findings")
+                    print("  /evidence CASE_ID | TEXT  Add a record in your own words")
+                    print("  /finding CASE_ID | STATUS | REASON [| SUPPORT_IDS | OPPOSE_IDS | SUPERSEDES_ID]")
+                    print("                          STATUS: supported, refuted, disputed, or unresolved")
                     print("  /branches               List conversations and their topics")
                     print("  /branch NAME            Copy this conversation to a new branch")
                     print("  /switch NAME            Continue on another branch")
@@ -810,6 +947,8 @@ def _chat(store: Store, model: str | None) -> None:
                     print("  /exit                   Leave the chat")
                 elif argument.strip().lower() == "advanced":
                     print("Advanced commands:")
+                    print("  /evidence CASE_ID | TEXT | TURN_ID | user|assistant | EXACT_QUOTE")
+                    print("                          Link a record to exact words in a saved turn")
                     print("  /context                Show the saved working context")
                     print("  /analysis               Show the latest full calculation")
                     print("  /target GOAL | METRIC | DESIRED | WHEN [| DIRECTION | UNIT | ACTION]")
@@ -832,7 +971,17 @@ def _chat(store: Store, model: str | None) -> None:
                     model = _required(argument, "/model MODEL")
                     print(f"Session model: {model}")
                 else:
-                    print(f"Session model: {model or os.environ.get('PIONEER_OPENAI_MODEL', 'gpt-6-astra')}")
+                    print(f"Session model: {model or os.environ.get('DAO_OPENAI_MODEL', os.environ.get('PIONEER_OPENAI_MODEL', 'gpt-6-astra'))}")
+            elif command == "/case":
+                _open_case(store, argument)
+            elif command == "/cases" and not argument:
+                _list_cases(store)
+            elif command == "/review":
+                _show_case(store, _required(argument, "/review CASE_ID"))
+            elif command == "/evidence":
+                _chat_evidence(store, argument)
+            elif command == "/finding":
+                _chat_finding(store, argument)
             elif command == "/branch":
                 name = _required(argument, "/branch NAME")
                 object_id = store.create_branch(name)
@@ -884,9 +1033,9 @@ def _chat(store: Store, model: str | None) -> None:
             elif command == "/resolve":
                 _chat_resolve(store, argument)
             elif command == "/forecast-accuracy":
-                source = argument.strip().lower() or "pioneer"
-                if source not in {"pioneer", "user", "all"}:
-                    raise StoreError("Use /forecast-accuracy [pioneer|user|all].")
+                source = argument.strip().lower() or "dao"
+                if source not in {"dao", "user", "all"}:
+                    raise StoreError("Use /forecast-accuracy [dao|user|all].")
                 _print_forecast_accuracy(store, source=source)
             elif command == "/analysis" and not argument:
                 for _, obj in store.log():
@@ -906,4 +1055,4 @@ def _chat(store: Store, model: str | None) -> None:
             else:
                 _ask(store, line, model, interactive=True)
         except (StoreError, ProviderError, DecisionError, OSError, json.JSONDecodeError, ValueError) as exc:
-            print(f"Pioneer: {exc}", file=sys.stderr)
+            print(f"Dao: {exc}", file=sys.stderr)

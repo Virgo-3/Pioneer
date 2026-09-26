@@ -2,7 +2,7 @@
 
 Jev's noul values describe its confidence in *questions about the situation*.
 They are never probabilities of a user's outcome or a substitute for the local
-decision engine. This module keeps its influence small enough for Pioneer to
+decision engine. This module keeps its influence small enough for Dao to
 give one ordinary conversational response.
 """
 
@@ -175,7 +175,7 @@ def should_consult_jev(text: str, context: dict | None) -> bool:
         return True
     if _FOLLOWUP_CUE.search(message):
         return True
-    # A bare answer is meaningful when Pioneer has a pending decision question.
+    # A bare answer is meaningful when Dao has a pending decision question.
     questions = context.get("next_questions")
     if (isinstance(questions, list) and questions and len(message.split()) <= 8
             and re.fullmatch(r"(?:yes|no|probably|maybe)[.!\s]*", message, re.IGNORECASE)):

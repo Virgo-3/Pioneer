@@ -2,7 +2,7 @@
 
 import unittest
 
-from pioneer.jev import make_jev_guidance, select_jev_context, should_consult_jev
+from dao.jev import make_jev_guidance, select_jev_context, should_consult_jev
 
 
 ACTIVE = {

@@ -6,9 +6,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from pioneer.cli import _ask, _chat, main
-from pioneer.pipeline import TurnOutcome
-from pioneer.state import Store
+from dao.cli import _ask, _chat, main
+from dao.pipeline import TurnOutcome
+from dao.state import Store
 
 
 class ChatTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class ChatTests(unittest.TestCase):
         return output.getvalue(), errors.getvalue()
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": ""})
-    @patch("pioneer.cli.run_turn")
+    @patch("dao.cli.run_turn")
     def test_chat_reply_stays_conversational_and_usage_is_on_demand(self, run_turn):
         run_turn.return_value = TurnOutcome("A pilot buys you time to learn.", "a" * 64, "test-model",
                                             [{"provider": "openai", "input_tokens": 10, "output_tokens": 6}],
@@ -66,7 +66,7 @@ class ChatTests(unittest.TestCase):
             self.assertEqual(main(["--repo", self.temp.name, "usage", "--prices", str(prices)]), 0)
         self.assertIn(expected + " | estimated $0.000066", output.getvalue())
 
-    @patch("pioneer.cli.run_turn")
+    @patch("dao.cli.run_turn")
     def test_chat_displays_local_records_after_the_model_reply(self, run_turn):
         run_turn.return_value = TurnOutcome(
             "I would try the pilot first.", "a" * 64, "test-model", [], None, "main",
@@ -75,15 +75,15 @@ class ChatTests(unittest.TestCase):
         output, errors = self.chat(["What should we do?", "/exit"])
         lines = output.splitlines()
         self.assertIn("OpenAI: I would try the pilot first.", lines)
-        self.assertIn("Pioneer checks:", lines)
+        self.assertIn("Dao checks:", lines)
         self.assertIn("  - Saved the desired outcome: 100 users by Friday.", lines)
         self.assertIn("  - Current gap from the target: 30 users.", lines)
         self.assertLess(lines.index("OpenAI: I would try the pilot first."),
-                        lines.index("Pioneer checks:"))
-        self.assertEqual(output.count("Pioneer checks:"), 1)
+                        lines.index("Dao checks:"))
+        self.assertEqual(output.count("Dao checks:"), 1)
         self.assertEqual(errors, "")
 
-    @patch("pioneer.cli.run_turn")
+    @patch("dao.cli.run_turn")
     def test_ask_displays_local_record_separately(self, run_turn):
         run_turn.return_value = TurnOutcome(
             "That plan could work if the pilot is cheap.", "a" * 64, "test-model", [],
@@ -93,9 +93,9 @@ class ChatTests(unittest.TestCase):
             _ask(self.store, "Should we pilot?")
         self.assertEqual(output.getvalue().splitlines(),
                          ["OpenAI: That plan could work if the pilot is cheap.",
-                          "Pioneer check: Saved forecast for Friday."])
+                          "Dao check: Saved forecast for Friday."])
 
-    @patch("pioneer.cli.run_turn")
+    @patch("dao.cli.run_turn")
     def test_ask_attributes_source_and_challenge_separately(self, run_turn):
         source = "a" * 64
         run_turn.return_value = TurnOutcome(
@@ -108,10 +108,10 @@ class ChatTests(unittest.TestCase):
             _ask(self.store, "Should we launch?")
         lines = output.getvalue().splitlines()
         self.assertEqual(lines[0], "OpenAI: I think we can launch now.")
-        self.assertEqual(lines[1], f'Pioneer history check: Earlier OpenAI at {source[:12]}: "We should wait for legal review."')
+        self.assertEqual(lines[1], f'Dao history check: Earlier OpenAI at {source[:12]}: "We should wait for legal review."')
         self.assertEqual(lines[2], "OpenAI review asks: What changed your view?")
 
-    @patch("pioneer.cli.run_turn")
+    @patch("dao.cli.run_turn")
     def test_ask_preserves_reply_lines_and_marks_multiline_checks(self, run_turn):
         run_turn.return_value = TurnOutcome(
             "First line\n\n  Keep this indentation.\n", "a" * 64, "test-model", [],
@@ -121,12 +121,12 @@ class ChatTests(unittest.TestCase):
             _ask(self.store, "What happened?")
         self.assertEqual(output.getvalue(),
                          "OpenAI: First line\n\n  Keep this indentation.\n"
-                         "Pioneer checks:\n"
+                         "Dao checks:\n"
                          "  - Saved target.\n"
                          "    Checkpoint: Friday.\n"
                          "  - Gap: 30 users.\n")
 
-    @patch("pioneer.cli.run_turn")
+    @patch("dao.cli.run_turn")
     def test_single_multiline_check_stays_visibly_separate(self, run_turn):
         run_turn.return_value = TurnOutcome(
             "I would wait.", "a" * 64, "test-model", [], None, "main",
@@ -136,10 +136,10 @@ class ChatTests(unittest.TestCase):
             _ask(self.store, "Should I wait?")
         self.assertEqual(output.getvalue(),
                          "OpenAI: I would wait.\n"
-                         "Pioneer check: Calculation verified:\n"
+                         "Dao check: Calculation verified:\n"
                          "  Wait value: 1.5\n")
 
-    @patch("pioneer.cli.run_turn")
+    @patch("dao.cli.run_turn")
     def test_history_check_names_user_source_and_escapes_quote_linebreak(self, run_turn):
         source = "a" * 64
         run_turn.return_value = TurnOutcome(
@@ -152,7 +152,7 @@ class ChatTests(unittest.TestCase):
             _ask(self.store, "Should we launch?")
         self.assertEqual(output.getvalue().splitlines(),
                          ["OpenAI: I think we can launch now.",
-                          f'Pioneer history check: Earlier You at {source[:12]}: "I said \\"wait\\".\\nUntil Friday."',
+                          f'Dao history check: Earlier You at {source[:12]}: "I said \\"wait\\".\\nUntil Friday."',
                           "OpenAI review asks: Did the timing change?"])
 
     def test_source_inspects_both_sides_on_current_branch(self):
