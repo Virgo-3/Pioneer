@@ -22,24 +22,24 @@ jobs:
       - name: Install builder
         run: python -m pip install pyinstaller==6.22.3
       - name: Build
-        run: python -m PyInstaller --clean --noconfirm --onefile --console --name Dao launcher.py
+        run: python -m PyInstaller --clean --noconfirm --onefile --console --name Pioneer launcher.py
       - name: Smoke test executable
         shell: pwsh
         run: |
-          & .\dist\Dao.exe --help
+          & .\dist\Pioneer.exe --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'dao-smoke-local'
-          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'dao-smoke-roaming'
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'pioneer-smoke-local'
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'pioneer-smoke-roaming'
           $env:OPENAI_API_KEY = 'smoke-test-no-network-call'
-          '/exit' | & .\dist\Dao.exe
+          '/exit' | & .\dist\Pioneer.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'Dao\workspace\.dao\HEAD'))) {
+          if (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'Pioneer\workspace\.pioneer\HEAD'))) {
             throw 'Double-click launch did not initialize the workspace.'
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: Dao-Windows
-          path: dist/Dao.exe
+          name: Pioneer-Windows
+          path: dist/Pioneer.exe
           if-no-files-found: error
       - name: Publish tagged build
         if: startsWith(github.ref, 'refs/tags/v')
@@ -57,12 +57,12 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           $body = @{
             tag_name = $tag
-            name = "Dao $tag"
-            body = 'Download Dao.exe and double click it. On first launch, paste your OpenAI API key or press Enter for offline decision tools.'
+            name = "Pioneer $tag"
+            body = 'Download Pioneer.exe and double click it. On first launch, paste your OpenAI API key or press Enter for offline decision tools.'
             draft = $true
             prerelease = $false
           } | ConvertTo-Json
           $release = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$repo/releases" -Headers $headers -ContentType 'application/json' -Body $body
-          Invoke-RestMethod -Method Post -Uri "https://uploads.github.com/repos/$repo/releases/$($release.id)/assets?name=Dao.exe" -Headers $headers -ContentType 'application/octet-stream' -InFile 'dist/Dao.exe' | Out-Null
+          Invoke-RestMethod -Method Post -Uri "https://uploads.github.com/repos/$repo/releases/$($release.id)/assets?name=Pioneer.exe" -Headers $headers -ContentType 'application/octet-stream' -InFile 'dist/Pioneer.exe' | Out-Null
           $publish = @{ draft = $false } | ConvertTo-Json
           Invoke-RestMethod -Method Patch -Uri "https://api.github.com/repos/$repo/releases/$($release.id)" -Headers $headers -ContentType 'application/json' -Body $publish | Out-Null

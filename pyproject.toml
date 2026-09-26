@@ -3,14 +3,14 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dao-terminal"
-version = "0.15.0"
-description = "Branchable, record-based adjudication in ordinary language"
+name = "pioneer-terminal"
+version = "0.14.0"
+description = "A branchable conversational AI terminal with explicit decision analysis"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
-dao = "dao.cli:main"
+pioneer = "pioneer.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["dao*"]
+include = ["pioneer*"]

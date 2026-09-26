@@ -10,8 +10,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from .adjudication import cases as adjudication_cases
-
 from .calibration import (CalibrationError, calibration_context, calibration_report,
                           forecast_records, validate_forecast)
 from .decision import DecisionError, analyze
@@ -29,7 +27,7 @@ NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?|(?<!
 WAIT_WORD = re.compile(r"\b(wait|waiting|delay|defer|postpone|hold off)\b", re.IGNORECASE)
 UNDO_WORD = re.compile(r"\b(undo|revert|reverse|reversible|rollback|roll back)\b", re.IGNORECASE)
 PERSISTENCE_CLAIM = re.compile(
-    r"\b(?:(?:i|we|dao)(?:['’]ve| have)?\s+"
+    r"\b(?:(?:i|we|pioneer)(?:['’]ve| have)?\s+"
     r"(?:(?:already|just|now)\s+)?(?:saved|logged|stored|tracked|recorded|marked)\s+"
     r"(?:(?:your|my|the|this|that|a|an)\s+)?"
     r"(?:(?:new|revised|updated|changed|latest|current|another|different|old|previous|prior)\s+)?"
@@ -40,7 +38,7 @@ PERSISTENCE_CLAIM = re.compile(
     r"(?P<passive_kind>forecast outcome|reported outcome|forecast|prediction|target|goal|"
     r"actual|result|outcome|record)\s+(?:has been|was|is)\s+"
     r"(?:(?:already|just|now)\s+)?(?:saved|logged|stored|tracked|recorded|marked)\b|"
-    r"(?:i|we|dao)(?:['’]ve| have)?\s+(?:(?:already|just|now)\s+)?"
+    r"(?:i|we|pioneer)(?:['’]ve| have)?\s+(?:(?:already|just|now)\s+)?"
     r"(?:saved|logged|stored)\s+(?P<generic_kind>it|that|this|one)\b)",
     re.IGNORECASE,
 )
@@ -57,7 +55,7 @@ DECISION_RECALL_TOPIC = re.compile(
 )
 RECALL_GENERIC_TERMS = {"acti", "case", "choi", "comp", "deci", "opti", "plan", "resu"}
 SAVE_HISTORY_QUERY = re.compile(
-    r"\b(?:did (?:you|we|dao)|have (?:you|we)|was|is|do (?:you|we)|"
+    r"\b(?:did (?:you|we|pioneer)|have (?:you|we)|was|is|do (?:you|we)|"
     r"are (?:you|we))\b.{0,50}\b(?:save|saved|record|recorded|track|tracked|"
     r"log|logged|store|stored)\b",
     re.IGNORECASE,
@@ -384,7 +382,7 @@ def _matching_calibration_topic(store: Store, records: list[dict], text: str) ->
     question_terms = _salient_terms(text)
     topic_scores = {topic: len(_salient_terms(topic))
                     for topic in {item["forecast"]["topic"] for item in records
-                                  if item["forecast"]["source"] in {"dao", "pioneer"}
+                                  if item["forecast"]["source"] == "pioneer"
                                   and item["resolution"] is not None and item["forecast"]["topic"]}
                     if _salient_terms(topic) and _salient_terms(topic) <= question_terms}
     best = max(topic_scores.values(), default=0)
@@ -647,7 +645,7 @@ def _objective_grounded(objective: dict[str, Any], text: str,
     if DESIRED_INTENT.search(text):
         source = text
     else:
-        # A short answer to Dao's deadline question may complete a target
+        # A short answer to Pioneer's deadline question may complete a target
         # from the immediately preceding user turn. Do not borrow from older
         # unrelated goals or from a turn that was not asking for the deadline.
         if len(messages) < 3 or messages[-2]["role"] != "assistant" or not re.search(
@@ -739,33 +737,6 @@ def _retracts_checkpoint(text: str, old_as_of: str, new_as_of: str) -> bool:
                              re.IGNORECASE))
 
 
-def _case_context(store: Store, branch: str) -> list[dict[str, Any]]:
-    """Give the conversation a bounded view of recent case records."""
-    result: list[dict[str, Any]] = []
-    for case in adjudication_cases(store, branch)[-2:]:
-        evidence = []
-        for item in case["evidence"][-6:]:
-            citation = item["citation"]
-            evidence.append({
-                "id": item["id"],
-                "text": item["text"][:500],
-                "source": ({"commit": citation["commit"], "role": citation["role"],
-                            "quote": citation["quote"][:250]} if citation else None),
-            })
-        finding = case["current_finding"]
-        result.append({
-            "id": case["id"],
-            "question": case["question"][:500],
-            "evidence": evidence,
-            "current_finding": ({"id": finding["id"], "conclusion": finding["conclusion"],
-                                 "rationale": finding["rationale"][:500],
-                                 "support": finding["support"], "oppose": finding["oppose"]}
-                                if finding else None),
-            "caveat": "These are user-authored records; quote provenance does not prove factual truth.",
-        })
-    return result
-
-
 def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcome:
     store.require()
     if not text.strip():
@@ -819,7 +790,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                                                    if item not in mentioned_resolved])[:3]
     calibration_evidence: dict[str, Any] | None = None
     if FORECAST_ACCURACY_QUERY.search(text):
-        calibration_evidence = calibration_report(store, starting_branch, source="dao")
+        calibration_evidence = calibration_report(store, starting_branch, source="pioneer")
     elif FORECAST_REQUEST.search(text):
         calibration_evidence = _matching_calibration_topic(store, records, text)
     elif previous_context and select_jev_context(text, previous_context) is not None:
@@ -922,7 +893,6 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
                             open_objectives=objective_context, open_outcomes=linked_context,
                             recent_objectives=recent_objective_context,
                             outcome_history=outcome_evidence,
-                            adjudication_cases=_case_context(store, starting_branch),
                             verified_decision=_recent_verified_decision(
                                 store, starting_branch, previous_context, text))
     except ProviderError as exc:
@@ -942,7 +912,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
     reply = plan.reply
     notices: list[str] = []
     if plan.state_error:
-        notices.append("Dao's state check was unavailable; no new records were saved from this reply.")
+        notices.append("Pioneer's state check was unavailable; no new records were saved from this reply.")
     if not reply.strip():
         store.commit("note", {"title": "Incomplete turn", "text": text, "jev": jev_assessment},
                      expected_head=head, expected_branch=starting_branch, usage=usage)
@@ -959,12 +929,12 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             if review.conflict:
                 history_challenge = verified_conflict(review.conflict, review_evidence)
                 if history_challenge is None:
-                    notices.append("Dao could not verify a proposed history citation.")
+                    notices.append("Pioneer could not verify a proposed history citation.")
         except ProviderError as exc:
             history_review_error = str(exc)
             if exc.usage:
                 usage.append({**exc.usage, "purpose": "history_review"})
-            notices.append("Dao's retrospective history check was unavailable for this turn.")
+            notices.append("Pioneer's retrospective history check was unavailable for this turn.")
     if decision_requested and plan.case_json:
         try:
             candidate = json.loads(plan.case_json)
@@ -986,7 +956,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
             and case is None and not validation_error):
         topic = str((plan.context or {}).get("goal", "")).strip()[:120]
         try:
-            candidate = validate_forecast(plan.forecast, source="dao", topic=topic, model=plan.model)
+            candidate = validate_forecast(plan.forecast, source="pioneer", topic=topic, model=plan.model)
             user_evidence = " ".join(message["content"] for message in messages[-7:]
                                      if message["role"] == "user")
             if (_deadline_mentioned(user_evidence, candidate["deadline"])
@@ -1152,7 +1122,7 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
         (plan.outcome_forecast, stored_outcome_forecast, "forecast"))
         if proposed is not None and saved is None}
     if rejected_records:
-        notices.append("Dao did not save the proposed " +
+        notices.append("Pioneer did not save the proposed " +
                        ", ".join(sorted(rejected_records)) + " record.")
     saved_now = {
         "forecast": stored_forecast is not None or stored_outcome_forecast is not None,
@@ -1177,10 +1147,10 @@ def run_turn(store: Store, text: str, *, model: str | None = None) -> TurnOutcom
     if unsupported_saves:
         subject = ", ".join(sorted(unsupported_saves))
         if save_history_query and any(saved_before.get(key, False) for key in unsupported_saves):
-            notices.append(f"OpenAI claimed a save for {subject}. Dao found an earlier record "
+            notices.append(f"OpenAI claimed a save for {subject}. Pioneer found an earlier record "
                            "of that type, but could not verify it matches this specific claim.")
         else:
-            notices.append(f"OpenAI claimed a save for {subject}, but Dao did not save "
+            notices.append(f"OpenAI claimed a save for {subject}, but Pioneer did not save "
                            "that record this turn.")
     explore = plan.explore_alternative and previous_context and previous_context.get("status") in {"active", "resolved"}
     payload: dict[str, Any] = {"user": text, "assistant": reply, "provider": "openai", "model": plan.model,

@@ -14,13 +14,7 @@ from .windows_credentials import load_openai_key, read_clipboard_text, save_open
 
 def workspace_path() -> Path:
     local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-    current = local / "Dao" / "workspace"
-    legacy = local / "Pioneer" / "workspace"
-    if (current / ".dao" / "HEAD").is_file():
-        return current
-    if (legacy / ".pioneer" / "HEAD").is_file() or (legacy / ".dao" / "HEAD").is_file():
-        return legacy
-    return current
+    return local / "Pioneer" / "workspace"
 
 
 def _load_saved_key(*, report_error: bool = False) -> bool:
@@ -41,7 +35,7 @@ def _load_saved_key(*, report_error: bool = False) -> bool:
 def _setup_key() -> None:
     if _load_saved_key(report_error=True):
         return
-    print("To connect OpenAI, copy your API key first. Dao will not print it.")
+    print("To connect OpenAI, copy your API key first. Pioneer will not print it.")
     print("Press Enter for clipboard, H to type hidden, V to paste visibly, or O for offline tools.")
     print("You can also paste an sk- key here directly; your terminal may display it as you paste.")
     while True:
@@ -120,9 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         store = Store(workspace_path())
         if not store.exists:
             store.init()
-            print(f"Your Dao workspace is ready at {store.root}.")
+            print(f"Your Pioneer workspace is ready at {store.root}.")
     except (OSError, StoreError) as exc:
-        print(f"Dao could not open its workspace: {exc}", file=sys.stderr)
+        print(f"Pioneer could not open its workspace: {exc}", file=sys.stderr)
         return 1
     _setup_key()
     return cli_main(["--repo", str(store.root), "chat"])

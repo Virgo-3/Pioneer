@@ -4,7 +4,7 @@ import copy
 import math
 import unittest
 
-from dao.decision import DecisionError, analyze
+from pioneer.decision import DecisionError, analyze
 
 
 class DecisionEdgeCaseTests(unittest.TestCase):

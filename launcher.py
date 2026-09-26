@@ -1,6 +1,6 @@
-"""PyInstaller entry point. Run Dao.exe with no arguments to start chatting."""
+"""PyInstaller entry point. Run Pioneer.exe with no arguments to start chatting."""
 
-from dao.desktop import main
+from pioneer.desktop import main
 
 
 if __name__ == "__main__":

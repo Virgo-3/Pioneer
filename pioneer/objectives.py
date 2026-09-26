@@ -56,7 +56,7 @@ def _finite_number(value: Any, name: str) -> float:
 def validate_objective(value: dict) -> dict:
     """Return a bounded, canonical target for a desired outcome.
 
-    ``deadline`` may be a date or an explicit resolution condition. Dao
+    ``deadline`` may be a date or an explicit resolution condition. Pioneer
     compares results only when the user reports one; it does not verify them.
     """
     if not isinstance(value, dict):

@@ -6,9 +6,9 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
-from dao.calibration import open_forecasts
-from dao.cli import _chat, main
-from dao.state import Store
+from pioneer.calibration import open_forecasts
+from pioneer.cli import _chat, main
+from pioneer.state import Store
 
 
 class CalibrationCommandTests(unittest.TestCase):
@@ -58,11 +58,11 @@ class CalibrationCommandTests(unittest.TestCase):
         self.assertIn("Average forecast: 70.0%", output)
         self.assertIn("Reported event rate: 100.0%", output)
         self.assertIn("Brier score: 0.090", output)
-        self.assertIn("Dao has not verified them", output)
+        self.assertIn("Pioneer has not verified them", output)
 
         status, output, errors = self.cli("forecast-accuracy")
         self.assertEqual((status, errors), (0, ""))
-        self.assertIn("No resolved Dao forecasts", output)
+        self.assertIn("No resolved Pioneer forecasts", output)
 
     def test_bare_percent_number_is_rejected_without_recording_forecast(self):
         status, _, errors = self.cli("forecast", "70", "Pilot finishes on time", "--by", "2027-01-01")

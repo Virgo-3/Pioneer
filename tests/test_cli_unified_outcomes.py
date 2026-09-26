@@ -8,10 +8,10 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
-from dao.cli import _chat, main
-from dao.objectives import add_objective, record_actual
-from dao.outcomes import outcome_report
-from dao.state import Store
+from pioneer.cli import _chat, main
+from pioneer.objectives import add_objective, record_actual
+from pioneer.outcomes import outcome_report
+from pioneer.state import Store
 
 
 class UnifiedOutcomeCliTests(unittest.TestCase):

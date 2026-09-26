@@ -3,8 +3,8 @@
 import tempfile
 import unittest
 
-from dao.history import MAX_EVIDENCE, MAX_TOTAL_CHARS, retrieve_history, verified_conflict
-from dao.state import Store
+from pioneer.history import MAX_EVIDENCE, MAX_TOTAL_CHARS, retrieve_history, verified_conflict
+from pioneer.state import Store
 
 
 class RetrospectiveHistoryTests(unittest.TestCase):

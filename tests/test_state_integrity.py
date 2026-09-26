@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from dao.state import Store, StoreError
+from pioneer.state import Store, StoreError
 
 
 class BranchIdentityTests(unittest.TestCase):
